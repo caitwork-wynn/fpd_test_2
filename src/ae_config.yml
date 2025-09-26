@@ -1,0 +1,59 @@
+# 7x7 Autoencoder 설정 파일
+
+model:
+  name: "ae_7x7"  # 모델 이름 (저장 파일명에 사용)
+  input_channels: 1  # 그레이스케일
+  output_channels: 1
+  latent_dim: 8  # Latent vector 차원
+
+data:
+  source_folder: "../data/base/not-labeled"  # 원본 이미지 폴더
+  image_size: 112  # 크롭된 이미지 크기
+  patch_size: 16  # 각 패치 크기 (112/7 = 16)
+  grid_size: 7  # 7x7 그리드
+  use_grayscale: true  # 그레이스케일 사용
+  max_images: null  # null이면 모든 이미지 사용, 숫자면 해당 개수만 사용
+
+training:
+  batch_size: 256
+  epochs: 10000
+  learning_rate: 0.00001
+  weight_decay: 0.0001
+
+  # 스케줄러 설정
+  scheduler:
+    type: "reduce_on_plateau"  # reduce_on_plateau, cosine
+    factor: 0.5
+    patience: 20
+    min_lr: 0.00001
+
+  # Early stopping
+  early_stopping:
+    patience: 500
+    min_delta: 0.000001
+
+  # 저장 및 시각화
+  save_interval: 10  # 체크포인트 저장 간격
+  viz_interval: 10  # 시각화 간격
+  viz_samples: 40  # 시각화할 샘플 수
+
+augmentation:
+  random_crop: true  # 랜덤 크롭 사용
+  horizontal_flip: true  # 좌우 반전 사용
+  crop_min_ratio: 0.8  # 최소 크롭 비율
+  crop_max_ratio: 1.0  # 최대 크롭 비율
+
+paths:
+  model_dir: "../model"
+  result_dir: "../result"
+  log_dir: "../logs"
+
+device:
+  use_cuda: true
+  cuda_device: 0
+
+# 로깅 설정
+logging:
+  verbose: true
+  save_csv: true  # 학습 로그 CSV 저장
+  progress_bar: true  # tqdm 진행 바 사용
