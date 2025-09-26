@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-700.make_7x7_autoencoder.py
-7x7 이미지 Autoencoder 학습 스크립트
+710.make_16x16_autoencoder.py
+16x16 이미지 Autoencoder 학습 스크립트
 
 - data/base/not-labeled의 이미지를 사용
 - 112x112로 랜덤 크롭 + 좌우 반전 증강
-- 7x7 그리드로 분할하여 학습 데이터 생성
+- 7x7 그리드로 분할하여 16x16 패치 생성 (리사이즈 없음)
 - 메모리 기반 학습으로 속도 최적화
 """
 
@@ -30,12 +30,12 @@ from typing import Dict, List, Tuple, Optional
 
 # 모델 import
 sys.path.append(str(Path(__file__).parent))
-from model_defs.autoencoder_7x7 import SeparatedResidualAutoencoder7x7
+from model_defs.autoencoder_16x16 import SeparatedResidualAutoencoder16x16
 
 
 class PatchDatasetMemory(Dataset):
     """
-    7x7 패치 데이터셋 (전체 데이터를 메모리에 로드)
+    16x16 패치 데이터셋 (전체 데이터를 메모리에 로드)
     """
 
     def __init__(self, config: Dict, mode: str = 'train'):
@@ -124,9 +124,9 @@ class PatchDatasetMemory(Dataset):
 
         # 채널 차원 추가 (그레이스케일의 경우)
         if self.use_grayscale and len(all_patches.shape) == 3:
-            all_patches = np.expand_dims(all_patches, axis=1)  # (N, 1, 7, 7)
+            all_patches = np.expand_dims(all_patches, axis=1)  # (N, 1, 16, 16)
         elif not self.use_grayscale and len(all_patches.shape) == 4:
-            all_patches = np.transpose(all_patches, (0, 3, 1, 2))  # (N, 3, 7, 7)
+            all_patches = np.transpose(all_patches, (0, 3, 1, 2))  # (N, 3, 16, 16)
 
         # 정규화 (0-1)
         all_patches = all_patches / 255.0
@@ -134,7 +134,7 @@ class PatchDatasetMemory(Dataset):
         return all_patches
 
     def extract_patches_from_image(self, image: np.ndarray, augment: bool = True) -> List[np.ndarray]:
-        """이미지에서 7x7 패치 추출"""
+        """이미지에서 16x16 패치 추출"""
         h, w = image.shape[:2]
 
         # 랜덤 크롭 또는 리사이즈
@@ -163,9 +163,8 @@ class PatchDatasetMemory(Dataset):
                 patch = resized[y_start:y_start+self.patch_size,
                                x_start:x_start+self.patch_size]
 
-                # 7x7로 리사이즈
-                patch_7x7 = cv2.resize(patch, (7, 7))
-                patches.append(patch_7x7)
+                # 16x16 패치를 그대로 사용 (리사이즈 없음)
+                patches.append(patch)
 
         return patches
 
@@ -264,7 +263,7 @@ def visualize_reconstruction(model, dataset, device, save_path, epoch, config):
             ax_recon.axis('off')
 
     # 제목 추가
-    fig.suptitle(f'Epoch {epoch} - Top: Original, Bottom: Reconstructed', fontsize=16)
+    fig.suptitle(f'Epoch {epoch} - Top: Original, Bottom: Reconstructed (16x16)', fontsize=16)
 
     # 저장
     plt.savefig(save_path, dpi=100, bbox_inches='tight')
@@ -287,11 +286,11 @@ def save_training_log(log_data: List[Dict], filepath: str):
 def main():
     """메인 함수"""
     print("=" * 60)
-    print("7x7 Autoencoder Training")
+    print("16x16 Autoencoder Training")
     print("=" * 60)
 
     # 설정 로드
-    config_path = Path(__file__).parent / 'ae_7x7_config.yml'
+    config_path = Path(__file__).parent / 'ae_16x16_config.yml'
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
@@ -345,7 +344,7 @@ def main():
 
     # 모델 생성
     print("\nCreating model...")
-    model = SeparatedResidualAutoencoder7x7(
+    model = SeparatedResidualAutoencoder16x16(
         input_channels=config['model']['input_channels'],
         output_channels=config['model']['output_channels'],
         latent_dim=config['model']['latent_dim']
@@ -478,7 +477,7 @@ def main():
             }
             torch.save(checkpoint_data, str(best_checkpoint_path))
 
-            # 현재 모델을 ae_7x7_current.pth로도 저장
+            # 현재 모델을 ae_16x16_current.pth로도 저장
             current_model_path = model_dir / f"{model_name}_current.pth"
             torch.save(checkpoint_data, str(current_model_path))
 
