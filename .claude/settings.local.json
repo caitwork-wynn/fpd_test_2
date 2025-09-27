@@ -12,7 +12,10 @@
       "Bash(git commit:*)",
       "Bash(copy:*)",
       "Bash(git rm:*)",
-      "Bash(timeout 10 python 201.learning_rvc.py)"
+      "Bash(timeout 10 python 201.learning_rvc.py)",
+      "Bash(timeout 10 python 201.learning_kornia.py)",
+      "Bash(timeout 15 python 201.learning_kornia.py)",
+      "Bash(timeout 30 python 201.learning_kornia.py)"
     ],
     "deny": [],
     "ask": []
