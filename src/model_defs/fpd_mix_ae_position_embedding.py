@@ -74,9 +74,23 @@ class LatentEmbeddingModel(nn.Module):
     def load_encoder(self, path):
         """Load pre-trained encoder weights"""
         if Path(path).exists():
-            state_dict = torch.load(path, map_location='cpu')
+            checkpoint = torch.load(path, map_location='cpu')
+            # Handle checkpoint format from autoencoder training
+            if 'model_state_dict' in checkpoint:
+                # Extract encoder weights (remove 'encoder.' prefix)
+                state_dict = {
+                    k.replace('encoder.', ''): v
+                    for k, v in checkpoint['model_state_dict'].items()
+                    if k.startswith('encoder.')
+                }
+            elif 'encoder_state_dict' in checkpoint:
+                state_dict = checkpoint['encoder_state_dict']
+            else:
+                state_dict = checkpoint
             self.encoder.load_state_dict(state_dict)
             print(f"Loaded encoder from {path}")
+        else:
+            print(f"Encoder file not found: {path}, using random initialization")
 
     def _init_weights(self):
         """Initialize weights using He normal initialization"""
@@ -99,12 +113,13 @@ class LatentEmbeddingModel(nn.Module):
 
                 # Get latent vector from encoder
                 with torch.no_grad() if self.encoder.training == False else torch.enable_grad():
-                    latent = self.encoder(patch)  # (batch, 16)
+                    latent, _ = self.encoder(patch)  # Returns (latent, residuals), we only need latent
 
                 # Add positional embedding if enabled
                 if self.position_embeddings is not None:
                     pos_idx = y * 7 + x
-                    pos_embed = self.position_embeddings(torch.tensor(pos_idx, device=device))
+                    pos_idx_tensor = torch.full((batch_size,), pos_idx, dtype=torch.long, device=device)
+                    pos_embed = self.position_embeddings(pos_idx_tensor)
                     latent = latent + pos_embed
 
                 latent_features.append(latent)
@@ -201,7 +216,19 @@ class DualPositionalEmbeddingModel(nn.Module):
     def load_encoder(self, path):
         """Load pre-trained encoder weights"""
         if Path(path).exists():
-            state_dict = torch.load(path, map_location='cpu')
+            checkpoint = torch.load(path, map_location='cpu')
+            # Handle checkpoint format from autoencoder training
+            if 'model_state_dict' in checkpoint:
+                # Extract encoder weights (remove 'encoder.' prefix)
+                state_dict = {
+                    k.replace('encoder.', ''): v
+                    for k, v in checkpoint['model_state_dict'].items()
+                    if k.startswith('encoder.')
+                }
+            elif 'encoder_state_dict' in checkpoint:
+                state_dict = checkpoint['encoder_state_dict']
+            else:
+                state_dict = checkpoint
             self.encoder.load_state_dict(state_dict)
 
     def forward(self, handcrafted_features, image):
@@ -217,7 +244,7 @@ class DualPositionalEmbeddingModel(nn.Module):
         for y in range(7):
             for x in range(7):
                 patch = image[:, :, y*16:(y+1)*16, x*16:(x+1)*16]
-                latent = self.encoder(patch)
+                latent, _ = self.encoder(patch)  # Returns (latent, residuals), we only need latent
 
                 if self.latent_pos_embed is not None:
                     pos_idx = y * 7 + x

@@ -9,11 +9,11 @@ hybrid_model:
   model_type: 'hybrid'
   use_latent: true
   use_handcrafted: true
-  encoder_path: '../model/ae_16x16_encoder.pth'
-  encoder_frozen: true  # Encoder 가중치 고정
+  encoder_path: '../model/ae_16x16_best.pth'  # 학습된 autoencoder 파일
+  encoder_frozen: true  # Encoder 가중치 고정 (학습하지 않음)
 
   # 차원 설정
-  handcrafted_dim: 903
+  handcrafted_dim: 903  # 49 patches × 18 features + 21 global = 882 + 21
   latent_dim: 784  # 49 patches × 16 dim
   input_dim: 1687  # 903 + 784
 
@@ -51,7 +51,7 @@ dual_positional_model:
       embedding_dim: 16
 
   # Feature dimensions
-  hand_crafted_dim: 903
+  handcrafted_dim: 903
   latent_dim: 784
   input_dim: 1687
 
@@ -98,7 +98,7 @@ rvc_model:
 
   # 모델 아키텍처
   architecture:
-    input_dim: 903  # 또는 1687 (hybrid), 2355 (dual_pos)
+    input_dim: 1687  # hybrid model 기준 (903 + 784)
 
     # 특징 추출 네트워크
     feature_network:
@@ -177,7 +177,7 @@ data:
     rotation: false
 
   # 경로 설정
-  data_path: '../data/base/not-labeled'
+  data_path: '../data/learning'  # 학습 데이터 경로 (labels.csv 포함)
   cache_path: '../data/cache'
 
 # ========================================

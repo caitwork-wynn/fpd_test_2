@@ -33,7 +33,6 @@ sys.path.append(str(Path(__file__).parent))
 from model_defs.fpd_mix_ae_position_embedding import (
     create_model, RvCLoss, LatentEmbeddingModel, RvCModel
 )
-from model_defs.multi_point_model_pytorch import MultiPointDetectorPyTorch
 
 
 class DualLogger:
@@ -66,7 +65,6 @@ class AdvancedMultiPointDataset(Dataset):
     def __init__(self,
                  source_folder: str,
                  labels_file: str,
-                 detector: MultiPointDetectorPyTorch,
                  mode: str = 'train',
                  config: Dict = None,
                  model_type: str = 'hybrid',
@@ -75,14 +73,12 @@ class AdvancedMultiPointDataset(Dataset):
         Args:
             source_folder: 이미지 폴더 경로
             labels_file: 레이블 파일명
-            detector: 특징 추출용 검출기
             mode: 'train', 'val', 'test'
             config: 설정 딕셔너리
             model_type: 'hybrid', 'dual_positional', 'rvc'
             augment: 데이터 증강 여부
         """
         self.source_folder = source_folder
-        self.detector = detector
         self.mode = mode
         self.config = config or {}
         self.model_type = model_type
@@ -121,13 +117,18 @@ class AdvancedMultiPointDataset(Dataset):
 
         labels = {}
         with open(labels_path, 'r', encoding='utf-8') as f:
-            for line in f:
+            lines = f.readlines()
+            # Skip header
+            for line in lines[1:]:
                 if line.strip():
                     parts = line.strip().split(',')
-                    if len(parts) >= 9:  # ID + 8 coordinates
-                        image_id = parts[0]
-                        coords = list(map(float, parts[1:9]))
-                        labels[image_id] = coords
+                    if len(parts) >= 11:  # ID, 투명도, 파일명, 8 coordinates
+                        file_name = parts[2]  # 파일명 (확장자 없음)
+                        # 파일명에서 확장자 제거
+                        file_id = file_name.replace('.png', '').replace('.jpg', '')
+                        # 좌표 추출 (4번째 컬럼부터)
+                        coords = list(map(float, parts[3:11]))
+                        labels[file_id] = coords
 
         return labels
 
@@ -142,9 +143,13 @@ class AdvancedMultiPointDataset(Dataset):
         # 파일명과 레이블 매칭
         valid_files = []
         for file_path in all_files:
-            file_id = file_path.stem
+            file_id = file_path.stem  # 확장자 제거한 파일명
+            # 파일명으로 직접 매칭
             if file_id in self.labels:
                 valid_files.append((file_path, self.labels[file_id]))
+            # 파일명 전체로도 매칭 시도
+            elif file_path.name in self.labels:
+                valid_files.append((file_path, self.labels[file_path.name]))
 
         # 데이터가 없는 경우 처리
         if not valid_files:
@@ -227,10 +232,89 @@ class AdvancedMultiPointDataset(Dataset):
 
     def _extract_features(self, image):
         """특징 추출 (hand-crafted features)"""
-        # 기존 detector 사용하여 특징 추출
-        # 여기서는 간단히 구현 (실제로는 200.learning_pytorch.py의 방식 사용)
-        features = self.detector.extract_features(image)
-        return features
+        # 7x7 그리드 기반 특징 추출
+        h, w = image.shape[:2]
+        cell_h = h // self.grid_size
+        cell_w = w // self.grid_size
+
+        features = []
+
+        # 각 그리드 셀에서 특징 추출
+        for y in range(self.grid_size):
+            for x in range(self.grid_size):
+                # 셀 영역 추출
+                y1, y2 = y * cell_h, (y + 1) * cell_h
+                x1, x2 = x * cell_w, (x + 1) * cell_w
+                cell = image[y1:y2, x1:x2]
+
+                # 간단한 특징 추출 (실제로는 더 복잡한 특징 사용)
+                # 1. 픽셀 통계 (2차원)
+                gray = cv2.cvtColor(cell, cv2.COLOR_RGB2GRAY) if len(cell.shape) == 3 else cell
+                features.append(np.mean(gray) / 255.0)
+                features.append(np.std(gray) / 255.0)
+
+                # 2. 엣지 밀도 (2차원)
+                edges = cv2.Canny(gray, 50, 150)
+                features.append(np.sum(edges > 0) / edges.size)
+                features.append(np.mean(edges) / 255.0)
+
+                # 3. 색상 통계 (6차원)
+                if len(cell.shape) == 3:
+                    for c in range(3):
+                        features.append(np.mean(cell[:, :, c]) / 255.0)
+                        features.append(np.std(cell[:, :, c]) / 255.0)
+                else:
+                    features.extend([np.mean(gray) / 255.0] * 6)
+
+                # 4. HSV 특징 (6차원)
+                if len(cell.shape) == 3:
+                    hsv = cv2.cvtColor(cell, cv2.COLOR_RGB2HSV)
+                    for c in range(3):
+                        features.append(np.mean(hsv[:, :, c]) / 255.0)
+                        features.append(np.std(hsv[:, :, c]) / 255.0)
+                else:
+                    features.extend([0.0] * 6)
+
+                # 5. Gradient 특징 (2차원) - req.md에 맞춰 18차원 만들기
+                sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+                sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+                features.append(np.mean(np.abs(sobel_x)) / 255.0)
+                features.append(np.mean(np.abs(sobel_y)) / 255.0)
+
+                # 총 18차원 per cell (2 + 2 + 6 + 6 + 2 = 18)
+
+        # 전역 특징 추가 (이미지 전체)
+        # 전체 통계 (3차원)
+        features.append(h / 1000.0)  # 높이
+        features.append(w / 1000.0)  # 너비
+        features.append((h/w) if w > 0 else 1.0)  # 종횡비
+
+        # 전체 색상 히스토그램 (12차원)
+        if len(image.shape) == 3:
+            for c in range(3):
+                hist, _ = np.histogram(image[:, :, c], bins=4, range=(0, 256))
+                hist = hist / hist.sum() if hist.sum() > 0 else hist
+                features.extend(hist.tolist())
+        else:
+            features.extend([0.0] * 12)
+
+        # 전체 엣지 특징 (3차원)
+        gray_full = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
+        edges_full = cv2.Canny(gray_full, 50, 150)
+        features.append(np.sum(edges_full > 0) / edges_full.size)
+
+        sobel_x = cv2.Sobel(gray_full, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray_full, cv2.CV_64F, 0, 1, ksize=3)
+        features.append(np.mean(np.abs(sobel_x)) / 255.0)
+        features.append(np.mean(np.abs(sobel_y)) / 255.0)
+
+        # 텍스처 특징 (3차원)
+        features.append(np.std(gray_full) / 255.0)
+        features.append(cv2.Laplacian(gray_full, cv2.CV_64F).std() / 255.0)
+        features.append(np.mean(np.abs(np.diff(gray_full.flatten()))) / 255.0)
+
+        # 7x7 그리드 * 18 features + 21 global features = 882 + 21 = 903
+        return np.array(features, dtype=np.float32)
 
     def _augment(self, image, target):
         """데이터 증강"""
@@ -267,13 +351,14 @@ class ModelTrainer:
     def __init__(self, config: Dict, model_type: str = 'hybrid'):
         self.config = config
         self.model_type = model_type
-        self.device = self._setup_device()
 
-        # 로거 설정
+        # 로거 설정 (device 설정보다 먼저)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_dir = Path('../logs') / model_type / timestamp
         log_dir.mkdir(parents=True, exist_ok=True)
         self.logger = DualLogger(str(log_dir / 'training.log'))
+
+        self.device = self._setup_device()
 
         # 모델 생성
         self.model = self._create_model()
@@ -543,24 +628,13 @@ def main():
 
     print(f"Loaded configuration from {config_path}")
 
-    # 기본 detector 생성 (특징 추출용)
-    detector_config_path = Path(__file__).parent / 'config.yml'
-    if detector_config_path.exists():
-        with open(detector_config_path, 'r', encoding='utf-8') as f:
-            detector_config = yaml.safe_load(f)
-        detector = MultiPointDetectorPyTorch(detector_config)
-    else:
-        # 기본 설정 사용
-        detector = MultiPointDetectorPyTorch({})
-
     # 데이터셋 생성
     data_config = config['data']
     data_path = Path(__file__).parent / data_config['data_path']
 
     train_dataset = AdvancedMultiPointDataset(
         source_folder=str(data_path),
-        labels_file='labels.csv',
-        detector=detector,
+        labels_file='labels.txt',
         mode='train',
         config=config,
         model_type=args.model,
@@ -569,8 +643,7 @@ def main():
 
     val_dataset = AdvancedMultiPointDataset(
         source_folder=str(data_path),
-        labels_file='labels.csv',
-        detector=detector,
+        labels_file='labels.txt',
         mode='val',
         config=config,
         model_type=args.model,
