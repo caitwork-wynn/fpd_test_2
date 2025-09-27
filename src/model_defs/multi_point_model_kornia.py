@@ -286,10 +286,12 @@ class KorniaFeatureExtractor(nn.Module):
         # Grayscale 변환
         gray = kcolor.rgb_to_grayscale(image)
 
-        # 사전 등록된 Sobel 커널 사용 (이미 같은 디바이스에 있음)
+        # 사전 등록된 Sobel 커널 사용 - 디바이스 확인 및 이동
         # Conv2d로 에지 검출 (ONNX 호환)
-        sobel_x = torch.nn.functional.conv2d(gray, self.sobel_x_kernel, padding=1)
-        sobel_y = torch.nn.functional.conv2d(gray, self.sobel_y_kernel, padding=1)
+        sobel_x_kernel = self.sobel_x_kernel.to(gray.device)
+        sobel_y_kernel = self.sobel_y_kernel.to(gray.device)
+        sobel_x = torch.nn.functional.conv2d(gray, sobel_x_kernel, padding=1)
+        sobel_y = torch.nn.functional.conv2d(gray, sobel_y_kernel, padding=1)
 
         # Edge magnitude 계산
         edge_magnitude = torch.sqrt(sobel_x**2 + sobel_y**2 + 1e-8)  # 작은 값 추가로 안정성 향상

@@ -548,6 +548,7 @@ def save_model_as_onnx(model, config, checkpoint_path, device):
         onnx_path = Path(str(checkpoint_path).replace('.pth', '.onnx'))
 
         # 모델을 CPU로 이동하고 평가 모드로 설정 (디바이스 충돌 방지)
+        original_device = device  # 원래 디바이스 저장
         model = model.cpu()
         model.eval()
 
@@ -577,9 +578,17 @@ def save_model_as_onnx(model, config, checkpoint_path, device):
                     verbose=False  # verbose 출력 비활성화
                 )
 
+        # 모델을 원래 디바이스로 복원하고 학습 모드로 설정
+        model = model.to(original_device)
+        model.train()
+
         return onnx_path
     except Exception as e:
         print(f"ONNX 변환 실패: {e}")
+        # 에러 발생 시에도 모델을 원래 디바이스로 복원
+        if 'original_device' in locals():
+            model = model.to(original_device)
+            model.train()
         return None
 
 
@@ -884,6 +893,8 @@ def main():
 
         # 콘솔 출력 (progress_interval에 따라)
         progress_interval = pytorch_config['logging'].get('progress_interval', 100)
+        detail_interval = pytorch_config['logging'].get('detail_interval', 500)
+
         if epoch == 1 or epoch % progress_interval == 0 or epoch == epochs:
             print(f"Epoch [{epoch:4d}/{epochs}] | "
                   f"시간: {epoch_time:5.1f}s | "
@@ -892,6 +903,47 @@ def main():
                   f"Train: {train_loss:.6f} | "
                   f"Val: {val_loss:.6f} | "
                   f"Err: {log_entry['avg_error']:.1f}px")
+
+        # detail_interval마다 상세 오차 분석 출력
+        if epoch % detail_interval == 0:
+            print(f"\n{'='*60}")
+            print(f"[상세 오차 분석] 에폭 {epoch}")
+            print(f"{'='*60}")
+
+            # 각 포인트별 오차 분석
+            print("\n각 포인트별 오차 분석 (pixels):")
+            for name in ['center', 'floor', 'front', 'side']:
+                if name in all_val_errors and all_val_errors[name]['dist']:
+                    dist_array = np.array(all_val_errors[name]['dist'])
+                    x_array = np.array(all_val_errors[name]['x'])
+                    y_array = np.array(all_val_errors[name]['y'])
+
+                    print(f"\n  {name.upper():6s}:")
+                    print(f"    X 오차: 평균={np.mean(x_array):.1f} 표준편차={np.std(x_array):.1f}")
+                    print(f"    Y 오차: 평균={np.mean(y_array):.1f} 표준편차={np.std(y_array):.1f}")
+                    print(f"    거리: 평균={np.mean(dist_array):.1f} 표준편차={np.std(dist_array):.1f}")
+
+            # 전체 평균 거리 오차
+            all_distances = []
+            for errors in all_val_errors.values():
+                all_distances.extend(errors['dist'])
+            overall_mean_dist = np.mean(all_distances) if all_distances else 0
+            print(f"\n전체 평균 거리 오차: {overall_mean_dist:.2f} pixels")
+
+            # 상세 통계
+            print("\n상세 통계 (거리 기준):")
+            for name in ['center', 'floor', 'front', 'side']:
+                if name in all_val_errors and all_val_errors[name]['dist']:
+                    dist_array = np.array(all_val_errors[name]['dist'])
+                    print(f"\n{name.upper()}:")
+                    print(f"  평균: {np.mean(dist_array):.2f}")
+                    print(f"  표준편차: {np.std(dist_array):.2f}")
+                    print(f"  중앙값: {np.median(dist_array):.2f}")
+                    print(f"  최소: {np.min(dist_array):.2f}")
+                    print(f"  최대: {np.max(dist_array):.2f}")
+                    print(f"  25% 분위수: {np.percentile(dist_array, 25):.2f}")
+                    print(f"  75% 분위수: {np.percentile(dist_array, 75):.2f}")
+            print(f"{'='*60}\n")
 
         # 체크포인트 저장
         if val_loss < best_val_loss - min_delta:
