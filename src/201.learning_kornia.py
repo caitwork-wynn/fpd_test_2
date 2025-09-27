@@ -547,11 +547,12 @@ def save_model_as_onnx(model, config, checkpoint_path, device):
         # ONNX 파일 경로 생성 (.pth -> .onnx)
         onnx_path = Path(str(checkpoint_path).replace('.pth', '.onnx'))
 
-        # 모델을 평가 모드로 설정
+        # 모델을 CPU로 이동하고 평가 모드로 설정 (디바이스 충돌 방지)
+        model = model.cpu()
         model.eval()
 
-        # 더미 입력 생성 (batch_size=1, 이미지 입력)
-        dummy_input = torch.randn(1, 3, 112, 112, device=device)
+        # 더미 입력 생성 (batch_size=1, 이미지 입력, CPU에서)
+        dummy_input = torch.randn(1, 3, 112, 112)  # device 지정 제거
 
         # ONNX로 변환 (Kornia 호환성 개선)
         with torch.no_grad():

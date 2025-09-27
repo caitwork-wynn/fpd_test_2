@@ -4,7 +4,7 @@ Kornia 기반 다중 포인트 검출 모델 (ONNX 호환 버전)
 - 색상 히스토그램, HSV 통계, 그레이디언트 통계 (단순화)
 - LBP 대체 (라플라시안 기반 텍스처 통계)
 - 가버 필터 응답 (고정 크기)
-- SOSNet 특징 추출
+- HardNet 특징 추출
 - ONNX 변환 최적화
 """
 
@@ -39,7 +39,7 @@ class KorniaFeatureExtractor(nn.Module):
         self.use_gradient = config.get('use_gradient', True)
         self.use_texture = config.get('use_texture', True)  # LBP 대체
         self.use_gabor = config.get('use_gabor', True)
-        self.use_sosnet = config.get('use_sosnet', True)
+        self.use_hardnet = config.get('use_hardnet', True)
 
         # 색상 히스토그램 bins
         self.hist_bins = config.get('hist_bins', 8)
@@ -49,18 +49,30 @@ class KorniaFeatureExtractor(nn.Module):
             self.gabor_kernel_size = 21  # 고정 크기
             self.create_gabor_filters_fixed()
 
-        # SOSNet 디스크립터
-        self.use_sosnet = self.use_sosnet and config.get('sosnet_enabled', True)
-        if self.use_sosnet:
+        # HardNet 디스크립터
+        self.use_hardnet = self.use_hardnet and config.get('hardnet_enabled', True)
+        if self.use_hardnet:
             try:
-                self.sosnet = kfeature.SOSNet(pretrained=True)
-                self.sosnet.eval()
+                self.hardnet = kfeature.HardNet(pretrained=True)
+                self.hardnet.eval()
                 # ONNX 변환시 eval 모드 고정
-                for param in self.sosnet.parameters():
+                for param in self.hardnet.parameters():
                     param.requires_grad = False
             except Exception as e:
-                print(f"SOSNet 초기화 실패, 비활성화: {e}")
-                self.use_sosnet = False
+                print(f"HardNet 초기화 실패, 비활성화: {e}")
+                self.use_hardnet = False
+
+        # Sobel 커널을 버퍼로 등록 (ONNX 호환성 및 디바이스 일치)
+        if self.use_texture:
+            sobel_x = torch.tensor([[-1, 0, 1],
+                                   [-2, 0, 2],
+                                   [-1, 0, 1]], dtype=torch.float32)
+            self.register_buffer('sobel_x_kernel', sobel_x.unsqueeze(0).unsqueeze(0))
+
+            sobel_y = torch.tensor([[-1, -2, -1],
+                                   [0, 0, 0],
+                                   [1, 2, 1]], dtype=torch.float32)
+            self.register_buffer('sobel_y_kernel', sobel_y.unsqueeze(0).unsqueeze(0))
 
         # 특징 차원 계산
         self.feature_dim = self.calculate_feature_dim()
@@ -139,8 +151,8 @@ class KorniaFeatureExtractor(nn.Module):
         if self.use_gabor:
             dim += 2 * (self.grid_size ** 2)  # 2개 필터 (0도, 90도)
 
-        # SOSNet (128차원 × grid^2)
-        if self.use_sosnet:
+        # HardNet (128차원 × grid^2)
+        if self.use_hardnet:
             dim += 128 * (self.grid_size ** 2)  # 7x7 그리드에서 추출
 
         return dim
@@ -270,18 +282,23 @@ class KorniaFeatureExtractor(nn.Module):
         return torch.cat(flat_features, dim=1)  # [B, num_features]
 
     def extract_texture_features(self, image: torch.Tensor) -> torch.Tensor:
-        """ONNX 호환 텍스처 통계 (LBP 대체 - 라플라시안 기반)"""
+        """ONNX 호환 텍스처 통계 (단순 gradient 기반)"""
         # Grayscale 변환
         gray = kcolor.rgb_to_grayscale(image)
 
-        # Laplacian 필터로 텍스처 패턴 추출
-        laplacian = kfilters.laplacian(gray, kernel_size=3)
+        # 사전 등록된 Sobel 커널 사용 (이미 같은 디바이스에 있음)
+        # Conv2d로 에지 검출 (ONNX 호환)
+        sobel_x = torch.nn.functional.conv2d(gray, self.sobel_x_kernel, padding=1)
+        sobel_y = torch.nn.functional.conv2d(gray, self.sobel_y_kernel, padding=1)
+
+        # Edge magnitude 계산
+        edge_magnitude = torch.sqrt(sobel_x**2 + sobel_y**2 + 1e-8)  # 작은 값 추가로 안정성 향상
 
         features = []
-        # laplacian의 shape 사용
-        B = laplacian.shape[0]
-        H = laplacian.shape[2]
-        W = laplacian.shape[3]
+        # edge_magnitude의 shape 사용
+        B = edge_magnitude.shape[0]
+        H = edge_magnitude.shape[2]
+        W = edge_magnitude.shape[3]
 
         # Grid별 텍스처 통계 (4개 특징으로 단순화)
         for gy in range(self.grid_size):
@@ -291,7 +308,7 @@ class KorniaFeatureExtractor(nn.Module):
                 x1 = gx * W // self.grid_size
                 x2 = (gx + 1) * W // self.grid_size
 
-                grid_region = laplacian[:, :, y1:y2, x1:x2]
+                grid_region = edge_magnitude[:, :, y1:y2, x1:x2]
 
                 # 빈 그리드 체크
                 if grid_region.numel() == 0 or grid_region.shape[2] == 0 or grid_region.shape[3] == 0:
@@ -351,8 +368,8 @@ class KorniaFeatureExtractor(nn.Module):
             flat_features.append(f)
         return torch.cat(flat_features, dim=1)  # [B, num_features]
 
-    def extract_sosnet_features(self, image: torch.Tensor) -> torch.Tensor:
-        """SOSNet 디스크립터 추출 - 7x7 그리드 기반"""
+    def extract_hardnet_features(self, image: torch.Tensor) -> torch.Tensor:
+        """HardNet 디스크립터 추출 - 7x7 그리드 기반"""
         # Grayscale 변환
         gray = kcolor.rgb_to_grayscale(image)
 
@@ -376,7 +393,7 @@ class KorniaFeatureExtractor(nn.Module):
 
                 patch = gray[:, :, y1:y2, x1:x2]
 
-                # 32x32로 리사이즈 (SOSNet 입력 크기) - 항상 수행 (ONNX 호환)
+                # 32x32로 리사이즈 (HardNet 입력 크기) - 항상 수행 (ONNX 호환)
                 patch = F.interpolate(patch, size=(32, 32), mode='bilinear', align_corners=False)
 
                 patches.append(patch)
@@ -384,9 +401,9 @@ class KorniaFeatureExtractor(nn.Module):
         # 배치로 합치기
         patches = torch.cat(patches, dim=0)  # [B*49, 1, 32, 32]
 
-        # SOSNet 특징 추출
+        # HardNet 특징 추출
         with torch.no_grad():
-            descriptors = self.sosnet(patches)  # [B*49, 128]
+            descriptors = self.hardnet(patches)  # [B*49, 128]
 
         # [B*49, 128] -> [B, 49*128=6272]
         B_total = descriptors.shape[0]
@@ -436,10 +453,10 @@ class KorniaFeatureExtractor(nn.Module):
             gabor_features = self.extract_gabor_features(image)  # [B, N]
             features.append(gabor_features)
 
-        # 7. SOSNet 특징
-        if self.use_sosnet:
-            sosnet_features = self.extract_sosnet_features(image)
-            features.append(sosnet_features)
+        # 7. HardNet 특징
+        if self.use_hardnet:
+            hardnet_features = self.extract_hardnet_features(image)
+            features.append(hardnet_features)
 
         # 특징 결합 - 모든 특징은 이미 [B, N] 형태
         combined_features = torch.cat(features, dim=1)
@@ -976,8 +993,8 @@ class MultiPointDetectorKornia:
         # 예측
         self.model.eval()
         with torch.no_grad():
-            predictions = self.model(image_tensor)
-            predictions = predictions.cpu().numpy()[0]
+            output = self.model(image_tensor)
+            predictions = output['coordinates'].cpu().numpy()[0]
 
         # 정규화된 좌표를 픽셀 좌표로 변환
         x_min = -self.image_size[0]
