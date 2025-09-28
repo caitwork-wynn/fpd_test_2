@@ -1,0 +1,750 @@
+# -*- coding: utf-8 -*-
+"""
+범용 다중 포인트 검출 모델 학습 스크립트
+- config.yml의 learning_model->source에서 모델 동적 로드
+- util 폴더의 유틸리티 활용
+- 결과는 error_analysis->results_dir/save_file_name 폴더에 저장
+"""
+
+import os
+import sys
+import yaml
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Optional
+import time
+import json
+import importlib.util
+import warnings
+
+# 경고 억제
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.onnx")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.jit")
+warnings.filterwarnings("ignore", category=UserWarning, module="kornia")
+warnings.filterwarnings("ignore", message=".*TracerWarning.*")
+warnings.filterwarnings("ignore", message=".*trace might not generalize.*")
+warnings.filterwarnings("ignore", message=".*constant folding.*")
+
+# sys.path에 현재 디렉토리 추가
+sys.path.append(str(Path(__file__).parent))
+
+# 유틸리티 import
+from util.dual_logger import DualLogger
+from util.save_load_model import save_model, load_model
+from util.error_analysis import display_error_analysis, save_error_analysis_json, save_training_log_csv
+
+
+def train_epoch(model, dataloader, optimizer, device, config):
+    """1 에폭 학습"""
+    model.train()
+    total_loss = 0
+
+    for batch_idx, batch in enumerate(dataloader):
+        images = batch['image'].to(device)
+        targets = batch['targets'].to(device)
+
+        # Forward
+        outputs = model(images)
+
+        # 모델의 compute_loss 메서드 사용
+        sigma = config['training']['loss'].get('soft_label_sigma', 1.0)
+        loss = model.compute_loss(outputs, targets, sigma=sigma)
+
+        # Backward
+        optimizer.zero_grad()
+        loss.backward()
+
+        # Gradient clipping
+        gradient_clip = config['training'].get('gradient_clip', 0)
+        if gradient_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+
+        optimizer.step()
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+
+def validate(model, dataloader, device):
+    """검증/테스트 평가"""
+    model.eval()
+    total_loss = 0
+
+    # 포인트 이름을 동적으로 결정 (4개 포인트 가정, 향후 확장 가능)
+    # TODO: 데이터셋에서 실제 포인트 이름을 가져올 수 있으면 더 좋음
+    point_names = ['center', 'floor', 'front', 'side']
+    all_errors = {}
+    for name in point_names:
+        all_errors[name] = {'x': [], 'y': [], 'dist': []}
+
+    # 데이터셋 객체 가져오기 (좌표 범위 정보 필요)
+    dataset = dataloader.dataset
+
+    with torch.no_grad():
+        for batch in dataloader:
+            images = batch['image'].to(device)
+            targets = batch['targets'].to(device)
+
+            outputs = model(images)
+
+            # 손실 계산
+            loss = model.compute_loss(outputs, targets, sigma=1.0)
+
+            # 연속 좌표 추출
+            outputs_coords = outputs['coordinates']  # [B, 8]
+
+            total_loss += loss.item()
+
+            # 픽셀 단위 오차 계산
+            outputs_np = outputs_coords.cpu().numpy()
+            targets_np = targets.cpu().numpy()
+
+            for i in range(len(outputs_np)):
+                # 정규화된 좌표를 원본 픽셀 좌표로 변환
+                pred_coords = []
+                true_coords = []
+
+                for j in range(0, 8, 2):
+                    # 예측 좌표 역정규화
+                    pred_x, pred_y = dataset.denormalize_coordinates(
+                        outputs_np[i][j], outputs_np[i][j+1]
+                    )
+                    pred_coords.extend([pred_x, pred_y])
+
+                    # 실제 좌표 역정규화
+                    true_x, true_y = dataset.denormalize_coordinates(
+                        targets_np[i][j], targets_np[i][j+1]
+                    )
+                    true_coords.extend([true_x, true_y])
+
+                pred_coords = np.array(pred_coords)
+                true_coords = np.array(true_coords)
+
+                # 각 포인트별 오차 계산 (동적 처리)
+                point_errors = {}
+                for idx, name in enumerate(point_names):
+                    x_idx = idx * 2
+                    y_idx = idx * 2 + 1
+                    point_errors[name] = {
+                        'x': pred_coords[x_idx] - true_coords[x_idx],
+                        'y': pred_coords[y_idx] - true_coords[y_idx]
+                    }
+
+                for key, err in point_errors.items():
+                    all_errors[key]['x'].append(abs(err['x']))
+                    all_errors[key]['y'].append(abs(err['y']))
+                    all_errors[key]['dist'].append(np.sqrt(err['x']**2 + err['y']**2))
+
+    avg_loss = total_loss / len(dataloader)
+
+    # 평균 오차 계산 (거리 기준)
+    avg_errors = {}
+    for key in all_errors:
+        if all_errors[key]['dist']:
+            avg_errors[key] = np.mean(all_errors[key]['dist'])
+        else:
+            avg_errors[key] = 0
+
+    # 모든 포인트가 없는 경우를 대비해 기본값 설정
+    for name in point_names:
+        if name not in avg_errors:
+            avg_errors[name] = 0
+
+    return avg_loss, avg_errors, all_errors
+
+
+
+
+def main():
+    """메인 함수"""
+    print("=" * 60)
+    print("범용 다중 포인트 검출 모델 학습")
+    print("- config.yml 기반 동적 모델 로딩")
+    print("- util 폴더 유틸리티 활용")
+    print("=" * 60)
+
+    # 설정 로드
+    config_path = Path(__file__).parent / 'config.yml'
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+
+    # 설정 정보 읽기
+    save_file_name = config['learning_model']['checkpointing']['save_file_name']
+
+    # 동적 모델 import
+    model_source = config['learning_model']['source']
+    model_path = (Path(__file__).parent / model_source).resolve()
+
+    print(f"\n모델 로딩: {model_path}")
+
+    # 모듈 동적 import
+    spec = importlib.util.spec_from_file_location("model_module", str(model_path))
+    model_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(model_module)
+
+    # 표준 클래스 import
+    PointDetectorDataSet = model_module.PointDetectorDataSet
+    PointDetector = model_module.PointDetector
+
+    print("모델 클래스 로드 완료")
+
+    # 경로 설정
+    base_dir = Path(__file__).parent
+    data_path = (base_dir / config['data']['source_folder']).resolve()
+
+    # 결과 디렉토리 생성
+    results_base_dir = Path(config['training']['error_analysis']['results_dir'])
+    if not results_base_dir.is_absolute():
+        results_base_dir = base_dir / results_base_dir
+    result_dir = results_base_dir / save_file_name
+    result_dir.mkdir(parents=True, exist_ok=True)
+    print(f"결과 저장 디렉토리: {result_dir}")
+
+    # 디바이스 설정
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+
+    if use_cuda:
+        print(f"\nGPU 사용: {torch.cuda.get_device_name(device)}")
+        print(f"GPU 메모리: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f}GB")
+    else:
+        print("\nCPU 사용")
+
+    # 로그 디렉토리 생성
+    log_dir = Path(config['logging']['log_dir'])
+    if not log_dir.is_absolute():
+        log_dir = base_dir / log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 로거 초기화
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"{save_file_name}_{timestamp}.log"
+    best_log_path = log_dir / f"{save_file_name}_best.log"
+
+    logger = DualLogger(str(log_path))
+    best_logger = DualLogger(str(best_log_path))
+
+    def log_print(message: str = ""):
+        """로거를 통한 출력"""
+        if logger:
+            logger.write(message + "\n")
+        else:
+            print(message)
+
+    # 체크포인트 디렉토리 설정
+    checkpoint_dir = Path(config['learning_model']['checkpointing']['save_dir'])
+    if not checkpoint_dir.is_absolute():
+        checkpoint_dir = base_dir / checkpoint_dir
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # 검출기 및 모델 생성
+    log_print("\n모델 초기화...")
+    # learning_model 섹션과 features 섹션을 합쳐서 전달
+    detector_config = config['learning_model'].copy()
+    detector_config['features'] = config['features']
+    detector_config['training'] = config['training']
+    detector = PointDetector(detector_config, device)
+    model = detector.model
+
+    # 모델 아키텍처 정보 출력
+    log_print("\n=== 모델 아키텍처 ===")
+    log_print(f"모델 소스: {model_source}")
+    log_print(f"입력: 3x{config['features']['image_size'][0]}x{config['features']['image_size'][1]} 이미지")
+    log_print(f"그리드 크기: {config['features']['grid_size']}x{config['features']['grid_size']}")
+
+    # 파라미터 수 계산
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log_print(f"\n총 파라미터 수: {total_params:,}")
+    log_print(f"학습 가능한 파라미터 수: {trainable_params:,}")
+
+    # 데이터셋 생성
+    log_print("\n데이터셋 생성 중...")
+
+    # config 형식 맞추기 (learning_model 섹션이 없는 경우를 위해)
+    dataset_config = config.copy()
+    if 'data_split' not in dataset_config:
+        dataset_config['data_split'] = {
+            'test_id_suffix': config['data']['test_id_suffix'],
+            'validation_ratio': config['data']['validation_ratio'],
+            'random_seed': config['data'].get('random_seed', 42)
+        }
+
+    # max_train_images 설정 읽기
+    max_train_images = config['data'].get('max_train_images', 0)
+
+    train_dataset = PointDetectorDataSet(
+        source_folder=str(data_path),
+        labels_file=config['data']['labels_file'],
+        detector=detector,
+        mode='train',
+        config=dataset_config,
+        augment=config['training']['augmentation']['enabled']
+    )
+
+    # max_train_images 적용 (0이 아닌 경우에만)
+    if max_train_images > 0:
+        # 원본 데이터 수 저장
+        original_size = 0
+
+        # 데이터 제한 적용
+        if hasattr(train_dataset, 'images') and train_dataset.images is not None:
+            # images 속성이 있는 경우 (kornia 모델 등)
+            original_size = len(train_dataset.images)
+            train_dataset.images = train_dataset.images[:max_train_images]
+            train_dataset.targets = train_dataset.targets[:max_train_images]
+            if hasattr(train_dataset, 'metadata'):
+                train_dataset.metadata = train_dataset.metadata[:max_train_images]
+            log_print(f"학습 데이터 제한 적용: {original_size}개 → {len(train_dataset.images)}개")
+
+        elif hasattr(train_dataset, 'features') and train_dataset.features is not None:
+            # features 속성이 있는 경우 (pytorch 모델 등)
+            original_size = len(train_dataset.features)
+            train_dataset.features = train_dataset.features[:max_train_images]
+            train_dataset.targets = train_dataset.targets[:max_train_images]
+            if hasattr(train_dataset, 'metadata'):
+                train_dataset.metadata = train_dataset.metadata[:max_train_images]
+            log_print(f"학습 데이터 제한 적용: {original_size}개 → {len(train_dataset.features)}개")
+
+        elif hasattr(train_dataset, 'data') and train_dataset.data is not None:
+            # data 속성이 있는 경우 (일반적인 경우)
+            original_size = len(train_dataset.data)
+            train_dataset.data = train_dataset.data[:max_train_images]
+            log_print(f"학습 데이터 제한 적용: {original_size}개 → {len(train_dataset.data)}개")
+        else:
+            log_print(f"경고: max_train_images가 설정되었지만 데이터셋 구조를 인식할 수 없습니다.")
+
+    val_dataset = PointDetectorDataSet(
+        source_folder=str(data_path),
+        labels_file=config['data']['labels_file'],
+        detector=detector,
+        mode='val',
+        config=dataset_config,
+        augment=False
+    )
+
+    test_dataset = PointDetectorDataSet(
+        source_folder=str(data_path),
+        labels_file=config['data']['labels_file'],
+        detector=detector,
+        mode='test',
+        config=dataset_config,
+        augment=False
+    )
+
+    # DataLoader 생성
+    batch_size = config['training']['batch_size']
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0
+    )
+
+    # 옵티마이저 설정
+    optimizer_name = config['training']['optimizer'].lower()
+    learning_rate = config['training']['learning_rate']
+    weight_decay = config['training']['weight_decay']
+
+    if optimizer_name == 'adam':
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+    elif optimizer_name == 'adamw':
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+    else:  # sgd
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=learning_rate,
+            momentum=0.9,
+            weight_decay=weight_decay
+        )
+
+    # 기존 체크포인트 확인 및 로드
+    start_epoch = 0
+    best_val_loss = float('inf')
+
+    try:
+        # 먼저 epoch 파일 로드 시도 (최신 epoch 파일 우선)
+        loaded_epoch = load_model(
+            model=model,
+            optimizer=optimizer,
+            save_dir=str(checkpoint_dir),
+            model_name=save_file_name,
+            load_best=False,  # epoch 파일 로드
+            device=device
+        )
+
+        if loaded_epoch > 0:
+            log_print(f"Epoch {loaded_epoch} 모델에서 학습 재개")
+            start_epoch = loaded_epoch
+
+            # epoch 파일에서 best_val_loss 정보 복원 시도
+            epoch_checkpoint_path = checkpoint_dir / f"{save_file_name}_epoch{loaded_epoch}.pth"
+            if epoch_checkpoint_path.exists():
+                checkpoint = torch.load(str(epoch_checkpoint_path), map_location=device, weights_only=False)
+                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+
+                # feature_mean, feature_std 복원 (있는 경우)
+                if 'feature_mean' in checkpoint:
+                    detector.feature_mean = checkpoint['feature_mean']
+                    detector.feature_std = checkpoint['feature_std']
+
+        log_print(f"에폭 {start_epoch}부터 학습 재개")
+        log_print(f"이전 최고 검증 손실: {best_val_loss:.6f}")
+
+    except FileNotFoundError:
+        # epoch 파일이 없으면 best 모델 로드 시도
+        try:
+            loaded_epoch = load_model(
+                model=model,
+                optimizer=optimizer,
+                save_dir=str(checkpoint_dir),
+                model_name=save_file_name,
+                load_best=True,  # best 모델 로드
+                device=device
+            )
+
+            if loaded_epoch == -1:  # best 모델
+                log_print("Best 모델에서 학습 재개 (epoch 파일 없음)")
+                # best 모델에서 재개할 때는 실제 epoch 정보를 체크포인트에서 읽어야 함
+                best_checkpoint_path = checkpoint_dir / f"{save_file_name}_best.pth"
+                checkpoint = torch.load(str(best_checkpoint_path), map_location=device, weights_only=False)
+                start_epoch = checkpoint.get('epoch', 0)
+                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+
+                # feature_mean, feature_std 복원 (있는 경우)
+                if 'feature_mean' in checkpoint:
+                    detector.feature_mean = checkpoint['feature_mean']
+                    detector.feature_std = checkpoint['feature_std']
+
+            log_print(f"에폭 {start_epoch}부터 학습 재개")
+            log_print(f"이전 최고 검증 손실: {best_val_loss:.6f}")
+
+        except FileNotFoundError:
+            # epoch 파일도 없고 best 파일도 없으면 새로운 학습
+            log_print("새로운 학습 시작")
+            start_epoch = 0
+
+    # 스케줄러 설정
+    scheduler_config = config['training']['scheduler']
+    if scheduler_config['type'] == 'reduce_on_plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            patience=scheduler_config['patience'],
+            factor=scheduler_config['factor'],
+            min_lr=scheduler_config['min_lr']
+        )
+    elif scheduler_config['type'] == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=config['training']['epochs'],
+            eta_min=scheduler_config['min_lr']
+        )
+    else:
+        scheduler = None
+
+    # 학습 설정
+    epochs = config['training']['epochs']
+    early_stopping_patience = config['training']['early_stopping']['patience']
+    min_delta = config['training']['early_stopping']['min_delta']
+    save_frequency = config['learning_model']['checkpointing']['save_frequency']
+
+    # 오차 분석 설정
+    error_analysis_config = config['training']['error_analysis']
+    error_analysis_enabled = error_analysis_config['enabled']
+    error_analysis_interval = error_analysis_config['interval']
+    save_raw_data = error_analysis_config['save_raw_data']
+
+    # 학습 시작
+    log_print(f"\n===== 학습 시작 =====")
+    log_print(f"시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_print(f"총 에폭: {epochs}")
+    log_print(f"Train: {len(train_dataset)}개, Val: {len(val_dataset)}개, Test: {len(test_dataset)}개")
+    log_print(f"배치 크기: {batch_size}")
+    log_print(f"학습률: {learning_rate:.6f}")
+    log_print(f"옵티마이저: {optimizer_name.upper()}")
+    log_print("=" * 50)
+
+    # 모델 정보 저장용 딕셔너리
+    model_info = {
+        'model_name': save_file_name,
+        'model_source': model_source,
+        'total_params': total_params,
+        'trainable_params': trainable_params,
+        'config': config,
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    best_epoch = 0
+    patience_counter = 0
+    training_log = []
+    training_start_time = time.time()
+
+    # 학습 루프
+    for epoch in range(start_epoch + 1, epochs + 1):
+        epoch_start_time = time.time()
+
+        # 학습
+        train_loss = train_epoch(model, train_loader, optimizer, device, config)
+
+        # 검증
+        val_loss, val_errors, all_val_errors = validate(model, val_loader, device)
+
+        # 스케줄러 업데이트
+        if scheduler:
+            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
+
+        # 에폭 시간 계산
+        epoch_time = time.time() - epoch_start_time
+        total_elapsed = time.time() - training_start_time
+        elapsed_h = int(total_elapsed // 3600)
+        elapsed_m = int((total_elapsed % 3600) // 60)
+        elapsed_s = int(total_elapsed % 60)
+        elapsed_str = f"{elapsed_h:02d}:{elapsed_m:02d}:{elapsed_s:02d}"
+
+        # 현재 학습률
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # 평균 오차 (0이 아닌 값들만으로 계산)
+        non_zero_errors = [v for v in val_errors.values() if v > 0]
+        avg_error = np.mean(non_zero_errors) if non_zero_errors else 0
+
+        # 로깅 (동적 포인트 처리)
+        log_entry = {
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'learning_rate': current_lr,
+            'avg_error': avg_error
+        }
+        # 각 포인트별 오차 추가
+        for name in ['center', 'floor', 'front', 'side']:
+            if name in val_errors:
+                log_entry[f'{name}_error'] = val_errors[name]
+            else:
+                log_entry[f'{name}_error'] = 0
+        training_log.append(log_entry)
+
+        # 콘솔 출력 (error_analysis.interval 사용)
+        if epoch == 1 or epoch % error_analysis_interval == 0 or epoch == epochs:
+            print(f"\nEpoch [{epoch:4d}/{epochs}] | "
+                  f"Time: {elapsed_str} | "
+                  f"Train Loss: {train_loss:.6f} | "
+                  f"Val Loss: {val_loss:.6f} | "
+                  f"LR: {current_lr:.6f}")
+            error_str = f"Avg Error: {avg_error:.1f}px"
+            for name in ['center', 'floor', 'front', 'side']:
+                if name in val_errors:
+                    error_str += f" | {name.capitalize()}: {val_errors[name]:.1f}px"
+            print(error_str)
+
+        # 오차 분석 출력 및 저장 (error_analysis_interval과 통합된 상세 출력)
+        if error_analysis_enabled and epoch % error_analysis_interval == 0:
+            log_print(f"\n{'='*60}")
+            log_print(f"[Epoch {epoch}] 검증 데이터 오차 분석")
+            log_print(f"{'='*60}")
+
+            # 오차 분석 출력
+            output_lines = display_error_analysis(
+                all_val_errors,
+                epoch=epoch
+            )
+            for line in output_lines:
+                log_print(line)
+
+            log_print(f"{'='*60}\n")
+
+            # JSON 저장
+            if save_raw_data:
+                json_path = result_dir / f"error_epoch_{epoch}.json"
+                save_error_analysis_json(
+                    errors=all_val_errors,
+                    epoch=epoch,
+                    save_path=str(json_path),
+                    additional_info={
+                        'train_loss': train_loss,
+                        'val_loss': val_loss,
+                        'learning_rate': current_lr,
+                        'avg_error_pixels': avg_error
+                    }
+                )
+                log_print(f"오차 분석 저장: {json_path}")
+
+        # 체크포인트 저장
+        if val_loss < best_val_loss - min_delta:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            patience_counter = 0
+
+            # 추가 정보 포함한 체크포인트 데이터
+            checkpoint_data = {
+                'epoch': epoch,
+                'best_val_loss': best_val_loss,
+                'val_errors': val_errors,
+                'model_config': config
+            }
+
+            # feature_mean, feature_std 저장 (있는 경우)
+            if hasattr(detector, 'feature_mean'):
+                checkpoint_data['feature_mean'] = detector.feature_mean
+                checkpoint_data['feature_std'] = detector.feature_std
+
+            # Best 모델 저장 (ONNX 자동 변환)
+            checkpoint_path = save_model(
+                model=model,
+                optimizer=optimizer,
+                save_dir=str(checkpoint_dir),
+                model_name=save_file_name,
+                is_best=True,
+                device=device
+            )
+
+            # 추가 정보를 체크포인트에 저장
+            checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+            checkpoint.update(checkpoint_data)
+            torch.save(checkpoint, str(checkpoint_path))
+
+            # Best 모델 정보를 결과 디렉토리에도 기록
+            best_info_path = result_dir / f"best_epoch_{epoch}.json"
+            with open(best_info_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'epoch': epoch,
+                    'val_loss': float(val_loss),
+                    'val_errors': {k: float(v) for k, v in val_errors.items()},
+                    'timestamp': datetime.now().isoformat()
+                }, f, indent=2, ensure_ascii=False)
+
+            log_print(f"\n[BEST] 모델 저장 완료! (Epoch {epoch}, Loss: {val_loss:.6f})")
+
+            # best 로거에 기록
+            if best_logger:
+                best_logger.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ")
+                best_logger.write(f"에폭 {epoch}: 손실={val_loss:.6f}, ")
+                best_logger.write(f"평균 오차={avg_error:.2f}px\n")
+        else:
+            patience_counter += 1
+
+            # Early stopping
+            if patience_counter >= early_stopping_patience:
+                log_print(f"\nEarly stopping triggered at epoch {epoch}")
+                break
+
+        # 주기적 저장
+        if epoch % save_frequency == 0:
+            if not config['learning_model']['checkpointing']['save_best_only']:
+                checkpoint_path = save_model(
+                    model=model,
+                    optimizer=optimizer,
+                    save_dir=str(checkpoint_dir),
+                    model_name=save_file_name,
+                    is_best=False,
+                    epoch=epoch
+                )
+                log_print(f"체크포인트 저장: {checkpoint_path}")
+
+    # 학습 완료 시간 계산
+    total_training_time = time.time() - training_start_time
+    total_hours = int(total_training_time // 3600)
+    total_minutes = int((total_training_time % 3600) // 60)
+    total_seconds = int(total_training_time % 60)
+
+    # 학습 로그 CSV 저장 (항상 저장)
+    log_csv_path = result_dir / "training_log.csv"
+    save_training_log_csv(training_log, str(log_csv_path))
+
+    # 테스트 데이터 최종 평가
+    log_print("\n=== 테스트 데이터 최종 평가 ===")
+    test_loss, test_errors, all_test_errors = validate(model, test_loader, device)
+
+    # 최종 오차 분석 출력
+    output_lines = display_error_analysis(
+        all_test_errors,
+        epoch='final',
+        title="=== 최종 테스트 결과 오차 분석 ==="
+    )
+    for line in output_lines:
+        log_print(line)
+
+    log_print(f"\n최종 테스트 손실: {test_loss:.6f}")
+    non_zero_test_errors = [v for v in test_errors.values() if v > 0]
+    final_avg_error = np.mean(non_zero_test_errors) if non_zero_test_errors else 0
+    log_print(f"최종 평균 오차: {final_avg_error:.2f} pixels")
+
+    # 최종 결과 JSON 저장
+    final_json_path = result_dir / "error_final.json"
+    save_error_analysis_json(
+        errors=all_test_errors,
+        epoch='final',
+        save_path=str(final_json_path),
+        additional_info={
+            'test_loss': float(test_loss),
+            'best_epoch': best_epoch,
+            'best_val_loss': float(best_val_loss),
+            'total_epochs': epoch,
+            'avg_error_pixels': float(final_avg_error),
+            'model_path': str(checkpoint_dir / f"{save_file_name}_best.pth")
+        }
+    )
+
+    # 모델 정보 JSON 저장
+    model_info['best_epoch'] = best_epoch
+    model_info['best_val_loss'] = float(best_val_loss)
+    model_info['final_test_loss'] = float(test_loss)
+    model_info['total_training_time'] = f"{total_hours:02d}:{total_minutes:02d}:{total_seconds:02d}"
+    model_info['final_epoch'] = epoch
+
+    model_info_path = result_dir / "model_info.json"
+    with open(model_info_path, 'w', encoding='utf-8') as f:
+        json.dump(model_info, f, indent=4, ensure_ascii=False)
+
+    # 로거 닫기
+    log_print("\n" + "=" * 60)
+    log_print("학습 완료!")
+    log_print(f"종료 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_print(f"전체 학습 시간: {total_hours:02d}:{total_minutes:02d}:{total_seconds:02d}")
+    log_print(f"최고 검증 손실: {best_val_loss:.6f} (Epoch {best_epoch})")
+    log_print(f"최종 테스트 손실: {test_loss:.6f}")
+    log_print(f"최종 평균 오차: {final_avg_error:.2f} pixels")
+    log_print(f"\n저장된 파일:")
+    log_print(f"  - 최고 모델: {checkpoint_dir / f'{save_file_name}_best.pth'}")
+    log_print(f"  - 최고 ONNX: {checkpoint_dir / f'{save_file_name}_best.onnx'}")
+    log_print(f"  - 결과 디렉토리: {result_dir}")
+    log_print(f"  - 실행 로그: {log_path}")
+    log_print("=" * 60)
+
+    logger.close()
+    best_logger.close()
+
+
+if __name__ == "__main__":
+    main()

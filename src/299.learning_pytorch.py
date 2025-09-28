@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 PyTorch 기반 7x7 Grid 다중 포인트 검출 모델 학습 스크립트
-- config.yml에서 모든 설정 읽기
+- config_pytorch.yml에서 모든 설정 읽기
 - ID 끝자리로 train/test 데이터 분리
 """
 
@@ -559,12 +559,12 @@ def main():
     """메인 함수"""
     print("=" * 60)
     print("PyTorch 기반 7x7 Grid 다중 포인트 검출 모델")
-    print("- config.yml 기반 설정")
+    print("- config_pytorch.yml 기반 설정")
     print("- ID 끝자리로 train/test 분리")
     print("=" * 60)
     
     # 설정 로드
-    config_path = Path(__file__).parent / 'config.yml'
+    config_path = Path(__file__).parent / 'config_pytorch.yml'
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     
@@ -1241,7 +1241,7 @@ def predict_and_visualize():
     print("=" * 60)
     
     # 설정 로드
-    config_path = Path(__file__).parent / 'config.yml'
+    config_path = Path(__file__).parent / 'config_pytorch.yml'
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     

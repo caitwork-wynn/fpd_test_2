@@ -36,360 +36,9 @@ warnings.filterwarnings("ignore", message=".*constant folding.*")
 
 # 모델 import
 sys.path.append(str(Path(__file__).parent))
-from model_defs.multi_point_model_kornia import MultiPointDetectorKornia
+from model_defs.multi_point_model_kornia import PointDetectorDataSet, PointDetector
+from util.dual_logger import DualLogger
 
-
-class DualLogger:
-    """화면과 파일에 동시 출력하는 로거 클래스"""
-
-    def __init__(self, log_path: str = None):
-        self.log_path = log_path
-        self.log_file = None
-        if log_path:
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            self.log_file = open(log_path, 'w', encoding='utf-8')
-
-    def write(self, message: str):
-        """메시지를 화면과 파일에 동시 출력"""
-        print(message, end='')
-        if self.log_file:
-            self.log_file.write(message)
-            self.log_file.flush()
-
-    def close(self):
-        """파일 핸들 닫기"""
-        if self.log_file:
-            self.log_file.close()
-            self.log_file = None
-
-
-class MultiPointDataset(Dataset):
-    """다중 포인트 검출 데이터셋 (Kornia 버전)"""
-
-    def __init__(self,
-                 source_folder: str,
-                 labels_file: str,
-                 detector: MultiPointDetectorKornia,
-                 mode: str = 'train',  # 'train', 'val', 'test'
-                 config: Dict = None,
-                 augment: bool = True,
-                 feature_mean: Optional[np.ndarray] = None,
-                 feature_std: Optional[np.ndarray] = None):
-        """
-        Args:
-            source_folder: 이미지 폴더 경로
-            labels_file: 레이블 파일명
-            detector: 특징 추출용 검출기
-            mode: 'train', 'val', 'test'
-            config: 설정 딕셔너리
-            augment: 데이터 증강 여부
-            feature_mean: 특징 정규화용 평균
-            feature_std: 특징 정규화용 표준편차
-        """
-        self.source_folder = source_folder
-        self.detector = detector
-        self.mode = mode
-        self.config = config or {}
-        self.augment = augment and (mode == 'train')
-        self.feature_mean = feature_mean
-        self.feature_std = feature_std
-
-        # 설정 읽기
-        self.test_id_suffix = str(config['data_split']['test_id_suffix'])
-        self.val_ratio = config['data_split']['validation_ratio']
-        self.augment_count = config['training']['augmentation']['augment_count'] if self.augment else 0
-        self.noise_std = config['training']['augmentation']['noise_std']
-        self.image_size = tuple(config['features']['image_size'])
-
-        # 크롭 증강 설정
-        self.crop_config = config['training']['augmentation'].get('crop', {})
-        self.crop_enabled = self.crop_config.get('enabled', False) and self.augment
-
-        # 좌표 정규화 범위 설정
-        coord_range = config['training']['augmentation'].get('coordinate_range', {})
-        # 이미지 크기가 width x height일 때 (현재는 width = height)
-        width = self.image_size[0]
-        height = self.image_size[1]
-        self.coord_min_x = coord_range.get('x_min_ratio', -1.0) * width  # -width
-        self.coord_max_x = coord_range.get('x_max_ratio', 2.0) * width   # width * 2
-        self.coord_min_y = coord_range.get('y_min_ratio', 0.0) * height   # 0
-        self.coord_max_y = coord_range.get('y_max_ratio', 2.0) * height   # height * 2
-
-        # 데이터 로드
-        self.data = []
-        self.load_data(labels_file)
-
-        # 이미지와 타겟 저장 (메모리에 미리 로드)
-        self.images = []
-        self.targets = []
-        self.metadata = []
-        self.precompute_data()
-
-        print(f"{mode.upper()} 데이터셋: {len(self.images)}개 샘플")
-
-    def load_data(self, labels_file: str):
-        """레이블 파일에서 데이터 로드 및 분할"""
-        labels_path = os.path.join(self.source_folder, labels_file)
-
-        with open(labels_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        all_train_data = []
-        test_data = []
-
-        # 헤더 스킵하고 처리
-        for idx, line in enumerate(lines[1:], 1):
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split(',')
-            if len(parts) < 11:
-                continue
-
-            # ID와 파일명
-            data_id = parts[0]  # ID 컬럼
-            filename = parts[2]
-
-            # 좌표 파싱 (실제 이미지 픽셀 좌표)
-            sample = {
-                'id': data_id,
-                'filename': filename,
-                'center_x': int(parts[3]),
-                'center_y': int(parts[4]),
-                'floor_x': int(parts[5]) if parts[5] != '0' else int(parts[3]),
-                'floor_y': int(parts[6]) if parts[6] != '0' else int(parts[4]),
-                'front_x': int(parts[7]) if parts[7] != '0' else int(parts[3]),
-                'front_y': int(parts[8]) if parts[8] != '0' else int(parts[4]),
-                'side_x': int(parts[9]) if parts[9] != '0' else int(parts[3]),
-                'side_y': int(parts[10]) if parts[10] != '0' else int(parts[4])
-            }
-
-            # ID 끝자리로 train/test 분리
-            if data_id.endswith(self.test_id_suffix):
-                test_data.append(sample)
-            else:
-                all_train_data.append(sample)
-
-        print(f"전체 데이터: Train {len(all_train_data)}개, Test {len(test_data)}개")
-
-        # mode에 따라 데이터 할당
-        if self.mode == 'test':
-            self.data = test_data
-        else:
-            # train/val 분할
-            random.seed(self.config['data_split']['random_seed'])
-            random.shuffle(all_train_data)
-
-            val_size = int(len(all_train_data) * self.val_ratio)
-
-            if self.mode == 'val':
-                self.data = all_train_data[:val_size]
-            else:  # train
-                self.data = all_train_data[val_size:]
-
-    def apply_crop_augmentation(self, image: np.ndarray, coords_orig: Dict[str, int]) -> Tuple[np.ndarray, Dict[str, int]]:
-        """이미지 크롭 및 좌표 조정
-
-        Args:
-            image: 원본 이미지 (원본 크기)
-            coords_orig: 원본 이미지 픽셀 좌표 딕셔너리
-
-        Returns:
-            크롭된 이미지(112x112)와 조정된 좌표
-        """
-        h, w = image.shape[:2]
-
-        # 랜덤 크롭 크기 결정
-        scale = random.uniform(self.crop_config.get('min_ratio', 0.8),
-                              self.crop_config.get('max_ratio', 1.0))
-        crop_h = int(h * scale)
-        crop_w = int(w * scale)
-
-        # 랜덤 크롭 위치 결정
-        max_shift = self.crop_config.get('max_shift', 0.15)
-        max_shift_x = int(w * max_shift)
-        max_shift_y = int(h * max_shift)
-
-        x1 = random.randint(0, min(max_shift_x, w - crop_w))
-        y1 = random.randint(0, min(max_shift_y, h - crop_h))
-        x2 = x1 + crop_w
-        y2 = y1 + crop_h
-
-        # 이미지 크롭
-        cropped_image = image[y1:y2, x1:x2]
-
-        # 리사이즈 (112x112로)
-        cropped_image = cv2.resize(cropped_image, self.image_size)
-
-        # 좌표 조정 (크롭 영역 기준으로)
-        adjusted_coords = {}
-        scale_x = self.image_size[0] / crop_w
-        scale_y = self.image_size[1] / crop_h
-
-        for key in ['center', 'floor', 'front', 'side']:
-            orig_x = coords_orig[f'{key}_x']
-            orig_y = coords_orig[f'{key}_y']
-
-            # 크롭 영역 기준으로 조정 후 112x112 스케일 적용
-            new_x = (orig_x - x1) * scale_x
-            new_y = (orig_y - y1) * scale_y
-
-            # 조정된 좌표 저장 (이미지 밖 좌표도 허용)
-            adjusted_coords[f'{key}_x'] = new_x
-            adjusted_coords[f'{key}_y'] = new_y
-
-        return cropped_image, adjusted_coords
-
-    def normalize_coordinates(self, x: float, y: float) -> Tuple[float, float]:
-        """좌표를 min-max 범위로 정규화
-
-        Args:
-            x: x 좌표 (픽셀)
-            y: y 좌표 (픽셀)
-
-        Returns:
-            정규화된 좌표 (0~1 범위)
-        """
-        # Min-Max 정규화
-        norm_x = (x - self.coord_min_x) / (self.coord_max_x - self.coord_min_x)
-        norm_y = (y - self.coord_min_y) / (self.coord_max_y - self.coord_min_y)
-
-        # 클리핑 (0~1 범위)
-        norm_x = np.clip(norm_x, 0, 1)
-        norm_y = np.clip(norm_y, 0, 1)
-
-        return norm_x, norm_y
-
-    def denormalize_coordinates(self, norm_x: float, norm_y: float) -> Tuple[float, float]:
-        """정규화된 좌표를 원본 범위로 복원
-
-        Args:
-            norm_x: 정규화된 x 좌표 (0~1)
-            norm_y: 정규화된 y 좌표 (0~1)
-
-        Returns:
-            원본 좌표 (픽셀)
-        """
-        x = norm_x * (self.coord_max_x - self.coord_min_x) + self.coord_min_x
-        y = norm_y * (self.coord_max_y - self.coord_min_y) + self.coord_min_y
-
-        return x, y
-
-    def precompute_data(self):
-        """모든 데이터를 미리 로드하여 저장 (Kornia는 이미지 직접 처리)"""
-        print(f"{self.mode.upper()} 데이터셋 로드 중...")
-
-        for sample in tqdm(self.data, desc="데이터 로드", disable=False):
-            # 이미지 로드
-            image_path = os.path.join(self.source_folder, sample['filename'])
-            orig_image = cv2.imread(image_path)
-
-            if orig_image is None:
-                # 이미지 로드 실패 시 더미 데이터 생성
-                print(f"Warning: 이미지 로드 실패 - {image_path}")
-                orig_image = np.zeros((*self.image_size, 3), dtype=np.uint8)
-                orig_h, orig_w = self.image_size
-            else:
-                orig_h, orig_w = orig_image.shape[:2]
-
-            # 원본 이미지의 좌표 (실제 픽셀 좌표)
-            coords_orig = {
-                'center_x': sample['center_x'],
-                'center_y': sample['center_y'],
-                'floor_x': sample['floor_x'],
-                'floor_y': sample['floor_y'],
-                'front_x': sample['front_x'],
-                'front_y': sample['front_y'],
-                'side_x': sample['side_x'],
-                'side_y': sample['side_y']
-            }
-
-            # 1. 원본 이미지 처리 (단순 리사이즈)
-            image_112 = cv2.resize(orig_image, self.image_size)
-
-            # 원본 이미지 크기에서 112x112로 좌표 변환
-            scale_x = self.image_size[0] / orig_w
-            scale_y = self.image_size[1] / orig_h
-
-            coords_112 = {}
-            for key in ['center', 'floor', 'front', 'side']:
-                coords_112[f'{key}_x'] = coords_orig[f'{key}_x'] * scale_x
-                coords_112[f'{key}_y'] = coords_orig[f'{key}_y'] * scale_y
-
-            # BGR to RGB
-            image_rgb = cv2.cvtColor(image_112, cv2.COLOR_BGR2RGB)
-
-            # HWC to CHW
-            image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1).float()
-
-            # 좌표 정규화 (min-max 방식)
-            targets = []
-            for key in ['center', 'floor', 'front', 'side']:
-                x = coords_112[f'{key}_x']
-                y = coords_112[f'{key}_y']
-                norm_x, norm_y = self.normalize_coordinates(x, y)
-                targets.extend([norm_x, norm_y])
-
-            targets = np.array(targets, dtype=np.float32)
-
-            # 원본 데이터 저장
-            self.images.append(image_tensor)
-            self.targets.append(torch.FloatTensor(targets))
-            self.metadata.append({
-                'filename': sample['filename'],
-                'id': sample['id'],
-                'augmented': False,
-                'aug_idx': 0
-            })
-
-            # 2. 크롭 증강 처리 (train 모드에서만)
-            if self.mode == 'train' and self.augment:
-                for aug_idx in range(self.augment_count):
-                    # 원본 이미지에서 크롭 증강 적용
-                    cropped_112, coords_cropped = self.apply_crop_augmentation(orig_image, coords_orig)
-
-                    # BGR to RGB
-                    cropped_rgb = cv2.cvtColor(cropped_112, cv2.COLOR_BGR2RGB)
-
-                    # HWC to CHW
-                    cropped_tensor = torch.from_numpy(cropped_rgb).permute(2, 0, 1).float()
-
-                    # 좌표 정규화
-                    targets_aug = []
-                    for key in ['center', 'floor', 'front', 'side']:
-                        x = coords_cropped[f'{key}_x']
-                        y = coords_cropped[f'{key}_y']
-                        norm_x, norm_y = self.normalize_coordinates(x, y)
-                        targets_aug.extend([norm_x, norm_y])
-
-                    targets_aug = np.array(targets_aug, dtype=np.float32)
-
-                    # 증강 데이터 저장
-                    self.images.append(cropped_tensor)
-                    self.targets.append(torch.FloatTensor(targets_aug))
-                    self.metadata.append({
-                        'filename': sample['filename'],
-                        'id': sample['id'],
-                        'augmented': True,
-                        'aug_idx': aug_idx + 1
-                    })
-
-    def __len__(self):
-        return len(self.images)
-
-    def __getitem__(self, idx):
-        """미리 로드된 이미지와 타겟 반환"""
-        image = self.images[idx].clone()
-        targets = self.targets[idx].clone()
-        metadata = self.metadata[idx]
-
-        return {
-            'image': image,
-            'targets': targets,
-            'filename': metadata['filename'],
-            'id': metadata['id']
-        }
 
 
 def train_epoch(model, dataloader, optimizer, criterion, device, config):
@@ -648,7 +297,7 @@ def main():
 
     # 검출기 및 모델 생성
     log_print("\n모델 초기화...")
-    detector = MultiPointDetectorKornia(pytorch_config, device)
+    detector = PointDetector(pytorch_config, device)
     model = detector.model
 
     # 모델 아키텍처 정보 출력
@@ -669,7 +318,7 @@ def main():
 
     # 데이터셋 생성
     print("\n데이터셋 생성 중...")
-    train_dataset = MultiPointDataset(
+    train_dataset = PointDetectorDataSet(
         source_folder=str(source_path),
         labels_file='labels.txt',
         detector=detector,
@@ -678,7 +327,7 @@ def main():
         augment=pytorch_config['training']['augmentation']['enabled']
     )
 
-    val_dataset = MultiPointDataset(
+    val_dataset = PointDetectorDataSet(
         source_folder=str(source_path),
         labels_file='labels.txt',
         detector=detector,
@@ -687,7 +336,7 @@ def main():
         augment=False
     )
 
-    test_dataset = MultiPointDataset(
+    test_dataset = PointDetectorDataSet(
         source_folder=str(source_path),
         labels_file='labels.txt',
         detector=detector,
