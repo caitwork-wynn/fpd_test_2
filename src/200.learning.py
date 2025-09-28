@@ -45,11 +45,11 @@ def train_epoch(model, dataloader, optimizer, device, config):
     total_loss = 0
 
     for batch_idx, batch in enumerate(dataloader):
-        images = batch['image'].to(device)
+        data = batch['data'].to(device)
         targets = batch['targets'].to(device)
 
         # Forward
-        outputs = model(images)
+        outputs = model(data)
 
         # 모델의 compute_loss 메서드 사용
         sigma = config['training']['loss'].get('soft_label_sigma', 1.0)
@@ -87,10 +87,10 @@ def validate(model, dataloader, device):
 
     with torch.no_grad():
         for batch in dataloader:
-            images = batch['image'].to(device)
+            data = batch['data'].to(device)
             targets = batch['targets'].to(device)
 
-            outputs = model(images)
+            outputs = model(data)
 
             # 손실 계산
             loss = model.compute_loss(outputs, targets, sigma=1.0)
@@ -278,46 +278,24 @@ def main():
     # max_train_images 설정 읽기
     max_train_images = config['data'].get('max_train_images', 0)
 
+    # extract_features 옵션 읽기
+    extract_features = config['training'].get('extract_features', False)
+    if extract_features:
+        log_print("특징 사전 추출 모드 활성화 (학습 속도 향상)")
+
     train_dataset = PointDetectorDataSet(
         source_folder=str(data_path),
         labels_file=config['data']['labels_file'],
         detector=detector,
         mode='train',
         config=dataset_config,
-        augment=config['training']['augmentation']['enabled']
+        augment=config['training']['augmentation']['enabled'],
+        extract_features=extract_features
     )
 
-    # max_train_images 적용 (0이 아닌 경우에만)
+    # max_train_images 설정 확인 (DataSet에서 이미 처리됨)
     if max_train_images > 0:
-        # 원본 데이터 수 저장
-        original_size = 0
-
-        # 데이터 제한 적용
-        if hasattr(train_dataset, 'images') and train_dataset.images is not None:
-            # images 속성이 있는 경우 (kornia 모델 등)
-            original_size = len(train_dataset.images)
-            train_dataset.images = train_dataset.images[:max_train_images]
-            train_dataset.targets = train_dataset.targets[:max_train_images]
-            if hasattr(train_dataset, 'metadata'):
-                train_dataset.metadata = train_dataset.metadata[:max_train_images]
-            log_print(f"학습 데이터 제한 적용: {original_size}개 → {len(train_dataset.images)}개")
-
-        elif hasattr(train_dataset, 'features') and train_dataset.features is not None:
-            # features 속성이 있는 경우 (pytorch 모델 등)
-            original_size = len(train_dataset.features)
-            train_dataset.features = train_dataset.features[:max_train_images]
-            train_dataset.targets = train_dataset.targets[:max_train_images]
-            if hasattr(train_dataset, 'metadata'):
-                train_dataset.metadata = train_dataset.metadata[:max_train_images]
-            log_print(f"학습 데이터 제한 적용: {original_size}개 → {len(train_dataset.features)}개")
-
-        elif hasattr(train_dataset, 'data') and train_dataset.data is not None:
-            # data 속성이 있는 경우 (일반적인 경우)
-            original_size = len(train_dataset.data)
-            train_dataset.data = train_dataset.data[:max_train_images]
-            log_print(f"학습 데이터 제한 적용: {original_size}개 → {len(train_dataset.data)}개")
-        else:
-            log_print(f"경고: max_train_images가 설정되었지만 데이터셋 구조를 인식할 수 없습니다.")
+        log_print(f"max_train_images 설정: {max_train_images}개")
 
     val_dataset = PointDetectorDataSet(
         source_folder=str(data_path),
@@ -325,7 +303,8 @@ def main():
         detector=detector,
         mode='val',
         config=dataset_config,
-        augment=False
+        augment=False,
+        extract_features=extract_features
     )
 
     test_dataset = PointDetectorDataSet(
@@ -334,7 +313,8 @@ def main():
         detector=detector,
         mode='test',
         config=dataset_config,
-        augment=False
+        augment=False,
+        extract_features=extract_features
     )
 
     # DataLoader 생성

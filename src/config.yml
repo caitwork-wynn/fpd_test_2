@@ -44,10 +44,11 @@ training:
   weight_decay: 0.01
   optimizer: 'adamw'  # adam, adamw, sgd
   gradient_clip: 5.0
+  extract_features: true  # true면 특징을 미리 추출하여 메모리에 캐싱 (학습 속도 10-20배 향상)
 
   # 데이터 증강
   augmentation:
-    enabled: true
+    enabled: false
     augment_count: 3  # 원본 데이터당 증강 샘플 수
     # 크롭 증강 설정
     crop:

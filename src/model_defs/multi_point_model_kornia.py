@@ -45,7 +45,8 @@ class DataSet(Dataset):
                  config: Dict = None,
                  augment: bool = True,
                  feature_mean: Optional[np.ndarray] = None,
-                 feature_std: Optional[np.ndarray] = None):
+                 feature_std: Optional[np.ndarray] = None,
+                 extract_features: bool = False):
         """
         Args:
             source_folder: 이미지 폴더 경로
@@ -56,6 +57,7 @@ class DataSet(Dataset):
             augment: 데이터 증강 여부
             feature_mean: 특징 정규화용 평균
             feature_std: 특징 정규화용 표준편차
+            extract_features: True면 특징을 미리 추출하여 메모리에 캐싱
         """
         self.source_folder = source_folder
         self.detector = detector
@@ -64,6 +66,7 @@ class DataSet(Dataset):
         self.augment = augment and (mode == 'train')
         self.feature_mean = feature_mean
         self.feature_std = feature_std
+        self.extract_features = extract_features
 
         # 설정 읽기
         self.test_id_suffix = str(config['data_split']['test_id_suffix'])
@@ -90,12 +93,16 @@ class DataSet(Dataset):
         self.load_data(labels_file)
 
         # 이미지와 타겟 저장 (메모리에 미리 로드)
-        self.images = []
+        self.images = []  # 이미지 또는 특징 저장
+        self.features = []  # 추출된 특징 저장 (extract_features=True일 때)
         self.targets = []
         self.metadata = []
         self.precompute_data()
 
-        print(f"{mode.upper()} 데이터셋: {len(self.images)}개 샘플")
+        if self.extract_features:
+            print(f"{mode.upper()} 데이터셋: {len(self.features)}개 샘플 (특징 캐싱됨)")
+        else:
+            print(f"{mode.upper()} 데이터셋: {len(self.images)}개 샘플")
 
     def load_data(self, labels_file: str):
         """레이블 파일에서 데이터 로드 및 분할"""
@@ -104,8 +111,7 @@ class DataSet(Dataset):
         with open(labels_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
-        all_train_data = []
-        test_data = []
+        all_data = []
 
         # 헤더 스킵하고 처리
         for idx, line in enumerate(lines[1:], 1):
@@ -135,28 +141,47 @@ class DataSet(Dataset):
                 'side_y': int(parts[10]) if parts[10] != '0' else int(parts[4])
             }
 
-            # ID 끝자리로 train/test 분리
-            if data_id.endswith(self.test_id_suffix):
+            all_data.append(sample)
+
+        print(f"전체 데이터: {len(all_data)}개")
+
+        # max_train_images를 먼저 적용 (전체 데이터에)
+        max_train_images = self.config.get('data', {}).get('max_train_images', 0)
+        if max_train_images > 0 and len(all_data) > max_train_images:
+            print(f"데이터 제한 적용: {len(all_data)}개 → {max_train_images}개")
+            random.seed(self.config['data_split']['random_seed'])
+            random.shuffle(all_data)
+            all_data = all_data[:max_train_images]
+
+        # 제한된 데이터에서 test/non-test 분리
+        test_data = []
+        non_test_data = []
+
+        for sample in all_data:
+            if sample['id'].endswith(self.test_id_suffix):
                 test_data.append(sample)
             else:
-                all_train_data.append(sample)
+                non_test_data.append(sample)
 
-        print(f"전체 데이터: Train {len(all_train_data)}개, Test {len(test_data)}개")
+        print(f"제한된 데이터 내 분포: Test {len(test_data)}개, Non-test {len(non_test_data)}개")
 
         # mode에 따라 데이터 할당
         if self.mode == 'test':
             self.data = test_data
+            print(f"Test 데이터: {len(self.data)}개")
         else:
-            # train/val 분할
+            # 제한된 non-test 데이터에서 train/val 분할
             random.seed(self.config['data_split']['random_seed'])
-            random.shuffle(all_train_data)
+            random.shuffle(non_test_data)
 
-            val_size = int(len(all_train_data) * self.val_ratio)
+            val_size = int(len(non_test_data) * self.val_ratio)
 
             if self.mode == 'val':
-                self.data = all_train_data[:val_size]
+                self.data = non_test_data[:val_size]
+                print(f"Validation 데이터: {len(self.data)}개 (non-test의 {self.val_ratio*100:.0f}%)")
             else:  # train
-                self.data = all_train_data[val_size:]
+                self.data = non_test_data[val_size:]
+                print(f"Train 데이터: {len(self.data)}개")
 
 
     def normalize_coordinates(self, x: float, y: float) -> Tuple[float, float]:
@@ -196,7 +221,12 @@ class DataSet(Dataset):
 
     def precompute_data(self):
         """모든 데이터를 미리 로드하여 저장 (Kornia는 이미지 직접 처리)"""
-        print(f"{self.mode.upper()} 데이터셋 로드 중...")
+        if self.extract_features:
+            print(f"{self.mode.upper()} 데이터셋 로드 중 (특징 추출 모드)...")
+            # 특징 추출을 위해 모델을 eval 모드로
+            self.detector.model.eval()
+        else:
+            print(f"{self.mode.upper()} 데이터셋 로드 중...")
 
         for sample in tqdm(self.data, desc="데이터 로드", disable=False):
             # 이미지 로드
@@ -251,8 +281,19 @@ class DataSet(Dataset):
 
             targets = np.array(targets, dtype=np.float32)
 
-            # 원본 데이터 저장
-            self.images.append(image_tensor)
+            # 특징 추출 또는 이미지 저장
+            if self.extract_features:
+                # 특징 추출 (GPU 사용 가능)
+                with torch.no_grad():
+                    image_batch = image_tensor.unsqueeze(0).to(self.detector.device)
+                    features = self.detector.model.feature_extractor(image_batch)
+                    features = features.cpu().squeeze(0)  # [feature_dim]
+                    self.features.append(features)
+            else:
+                # 이미지 저장 (기존 방식)
+                self.images.append(image_tensor)
+
+            # 타겟과 메타데이터는 공통
             self.targets.append(torch.FloatTensor(targets))
             self.metadata.append({
                 'filename': sample['filename'],
@@ -286,8 +327,19 @@ class DataSet(Dataset):
 
                     targets_aug = np.array(targets_aug, dtype=np.float32)
 
-                    # 증강 데이터 저장
-                    self.images.append(cropped_tensor)
+                    # 증강 데이터에 대한 특징 추출 또는 이미지 저장
+                    if self.extract_features:
+                        # 증강된 이미지의 특징 추출
+                        with torch.no_grad():
+                            cropped_batch = cropped_tensor.unsqueeze(0).to(self.detector.device)
+                            features = self.detector.model.feature_extractor(cropped_batch)
+                            features = features.cpu().squeeze(0)
+                            self.features.append(features)
+                    else:
+                        # 이미지 저장
+                        self.images.append(cropped_tensor)
+
+                    # 타겟과 메타데이터
                     self.targets.append(torch.FloatTensor(targets_aug))
                     self.metadata.append({
                         'filename': sample['filename'],
@@ -297,16 +349,25 @@ class DataSet(Dataset):
                     })
 
     def __len__(self):
-        return len(self.images)
+        if self.extract_features:
+            return len(self.features)
+        else:
+            return len(self.images)
 
     def __getitem__(self, idx):
-        """미리 로드된 이미지와 타겟 반환"""
-        image = self.images[idx].clone()
+        """미리 로드된 이미지/특징과 타겟 반환"""
         targets = self.targets[idx].clone()
         metadata = self.metadata[idx]
 
+        if self.extract_features:
+            # 특징 반환 (2D tensor)
+            data = self.features[idx].clone()
+        else:
+            # 이미지 반환 (4D tensor)
+            data = self.images[idx].clone()
+
         return {
-            'image': image,
+            'data': data,  # 특징(2D) 또는 이미지(4D)
             'targets': targets,
             'filename': metadata['filename'],
             'id': metadata['id']
