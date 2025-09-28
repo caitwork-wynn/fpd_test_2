@@ -396,8 +396,6 @@ def train_epoch(model, dataloader, optimizer, criterion, device, config):
     """1 에폭 학습"""
     model.train()
     total_loss = 0
-    # FPD 모델만 사용
-    use_fpd = True  # 항상 FPD 아키텍처 사용
 
     for batch_idx, batch in enumerate(dataloader):
         images = batch['image'].to(device)
@@ -406,12 +404,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device, config):
         # Forward (모델이 내부적으로 특징 추출)
         outputs = model(images)
 
-        if use_fpd:
-            # FPD 모델: 분류 기반 회귀 손실
-            loss = model.compute_loss(outputs, targets, sigma=1.0)
-        else:
-            # 기존 MLP: MSE 손실
-            loss = criterion(outputs, targets)
+        # FPD 모델: 분류 기반 회귀 손실
+        loss = model.compute_loss(outputs, targets, sigma=1.0)
 
         # Backward
         optimizer.zero_grad()
@@ -439,7 +433,6 @@ def validate(model, dataloader, criterion, device):
         'front': {'x': [], 'y': [], 'dist': []},
         'side': {'x': [], 'y': [], 'dist': []}
     }
-    use_fpd = hasattr(model, 'MODEL_NAME') and model.MODEL_NAME == 'fpd_kornia'
 
     # 첫 번째 배치에서 데이터셋 객체 가져오기 (좌표 범위 정보 필요)
     dataset = dataloader.dataset
@@ -451,15 +444,10 @@ def validate(model, dataloader, criterion, device):
 
             outputs = model(images)
 
-            if use_fpd:
-                # FPD 모델: 분류 기반 회귀 손실
-                loss = model.compute_loss(outputs, targets, sigma=1.0)
-                # 연속 좌표 추출
-                outputs_coords = outputs['coordinates']  # [B, 8]
-            else:
-                # 기존 MLP: MSE 손실
-                loss = criterion(outputs, targets)
-                outputs_coords = outputs
+            # FPD 모델: 분류 기반 회귀 손실
+            loss = model.compute_loss(outputs, targets, sigma=1.0)
+            # 연속 좌표 추출
+            outputs_coords = outputs['coordinates']  # [B, 8]
 
             total_loss += loss.item()
 
