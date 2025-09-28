@@ -47,7 +47,7 @@ pytorch_model:
 
   # 학습 설정
   training:
-    batch_size: 1024  # 메모리 사용량 감소를 위해 줄임
+    batch_size: 512  # 메모리 사용량 감소를 위해 줄임
     epochs: 1000000
     learning_rate: 0.001  # 더 낮은 학습률
     weight_decay: 0.01  # L2 정규화 (Adam optimizer의 weight_decay)
