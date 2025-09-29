@@ -1,19 +1,25 @@
 learning_model:
-  source: 'model_defs/multi_point_model_attention.py'
+  source: 'model_defs/floor_model_attention.py'  # floor 전용 모델로 변경
+  # 타겟 포인트 설정 (floor만 학습)
+  target_points: ['floor']  # ['center', 'floor', 'front', 'side'] 중 선택 가능
   # 아키텍처 설정
   architecture:
     # FPD 아키텍처 사용 여부 (true: FPD 분류 기반 회귀, false: 기존 MLP)
     use_fpd_architecture: true
-    # Kornia 특징 설정 (feature extractor에서 사용)
+    # 특징 추출 설정
     features:
       image_size: [112, 112]
       grid_size: 7
+      # Autoencoder 기반 특성 추출 설정
+      use_autoencoder: false
+      encoder_path: '../model/autoencoder_16x16_best.pth'
+      encoder_latent_dim: 16
   # 모델 저장 설정
   checkpointing:
     save_dir: '../model'
     save_best_only: false
     save_frequency: 1000            # 에폭 단위
-    save_file_name: 'multi_point_attention'  # Model file name for attention-based model
+    save_file_name: 'floor_only_attention'  # Floor only attention model
     
 # 데이터
 data:
@@ -22,12 +28,8 @@ data:
   test_id_suffix: '1'
   validation_ratio: 0.2
   random_seed: 42
-  max_train_images: 0  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
+  max_train_images: 200  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
 
-# 특징 추출 설정
-features:
-  image_size: [112, 112]
-  grid_size: 7
 
 # 학습 설정
 training:

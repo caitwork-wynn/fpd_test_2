@@ -75,9 +75,25 @@ def validate(model, dataloader, device):
     model.eval()
     total_loss = 0
 
-    # 포인트 이름을 동적으로 결정 (4개 포인트 가정, 향후 확장 가능)
-    # TODO: 데이터셋에서 실제 포인트 이름을 가져올 수 있으면 더 좋음
-    point_names = ['center', 'floor', 'front', 'side']
+    # 첫 번째 배치에서 포인트 정보 자동 감지
+    sample_batch = next(iter(dataloader))
+    sample_output = model(sample_batch['data'].to(device))
+
+    # 포인트 이름 자동 감지
+    if 'point_names' in sample_output:
+        point_names = sample_output['point_names']
+    elif 'point_names' in sample_batch:
+        point_names = sample_batch['point_names']
+    else:
+        # 좌표 개수로부터 추론
+        num_coords = sample_output['coordinates'].shape[1]
+        if num_coords == 2:
+            point_names = ['floor']
+        elif num_coords == 8:
+            point_names = ['center', 'floor', 'front', 'side']
+        else:
+            point_names = [f'point_{i//2}' for i in range(0, num_coords, 2)]
+
     all_errors = {}
     for name in point_names:
         all_errors[name] = {'x': [], 'y': [], 'dist': []}
@@ -96,7 +112,7 @@ def validate(model, dataloader, device):
             loss = model.compute_loss(outputs, targets, sigma=1.0)
 
             # 연속 좌표 추출
-            outputs_coords = outputs['coordinates']  # [B, 8]
+            outputs_coords = outputs['coordinates']  # [B, N] N은 좌표 개수
 
             total_loss += loss.item()
 
@@ -109,7 +125,7 @@ def validate(model, dataloader, device):
                 pred_coords = []
                 true_coords = []
 
-                for j in range(0, 8, 2):
+                for j in range(0, outputs_coords.shape[1], 2):
                     # 예측 좌표 역정규화
                     pred_x, pred_y = dataset.denormalize_coordinates(
                         outputs_np[i][j], outputs_np[i][j+1]
@@ -130,10 +146,11 @@ def validate(model, dataloader, device):
                 for idx, name in enumerate(point_names):
                     x_idx = idx * 2
                     y_idx = idx * 2 + 1
-                    point_errors[name] = {
-                        'x': pred_coords[x_idx] - true_coords[x_idx],
-                        'y': pred_coords[y_idx] - true_coords[y_idx]
-                    }
+                    if x_idx < len(pred_coords) and y_idx < len(pred_coords):
+                        point_errors[name] = {
+                            'x': pred_coords[x_idx] - true_coords[x_idx],
+                            'y': pred_coords[y_idx] - true_coords[y_idx]
+                        }
 
                 for key, err in point_errors.items():
                     all_errors[key]['x'].append(abs(err['x']))
@@ -190,6 +207,8 @@ def main():
     # 표준 클래스 import
     PointDetectorDataSet = model_module.PointDetectorDataSet
     PointDetector = model_module.PointDetector
+    # Autoencoder 버전도 import (존재하는 경우)
+    PointDetectorDataSetWithAutoencoder = getattr(model_module, 'PointDetectorDataSetWithAutoencoder', None)
 
     print("모델 클래스 로드 완료")
 
@@ -246,7 +265,7 @@ def main():
     log_print("\n모델 초기화...")
     # learning_model 섹션과 features 섹션을 합쳐서 전달
     detector_config = config['learning_model'].copy()
-    detector_config['features'] = config['features']
+    detector_config['features'] = config['learning_model']['architecture']['features']
     detector_config['training'] = config['training']
     detector = PointDetector(detector_config, device)
     model = detector.model
@@ -254,8 +273,9 @@ def main():
     # 모델 아키텍처 정보 출력
     log_print("\n=== 모델 아키텍처 ===")
     log_print(f"모델 소스: {model_source}")
-    log_print(f"입력: 3x{config['features']['image_size'][0]}x{config['features']['image_size'][1]} 이미지")
-    log_print(f"그리드 크기: {config['features']['grid_size']}x{config['features']['grid_size']}")
+    features_config = config['learning_model']['architecture']['features']
+    log_print(f"입력: 3x{features_config['image_size'][0]}x{features_config['image_size'][1]} 이미지")
+    log_print(f"그리드 크기: {features_config['grid_size']}x{features_config['grid_size']}")
 
     # 파라미터 수 계산
     total_params = sum(p.numel() for p in model.parameters())
@@ -283,39 +303,93 @@ def main():
     if extract_features:
         log_print("특징 사전 추출 모드 활성화 (학습 속도 향상)")
 
-    train_dataset = PointDetectorDataSet(
-        source_folder=str(data_path),
-        labels_file=config['data']['labels_file'],
-        detector=detector,
-        mode='train',
-        config=dataset_config,
-        augment=config['training']['augmentation']['enabled'],
-        extract_features=extract_features
-    )
+    # 타겟 포인트 설정 읽기
+    target_points = config.get('learning_model', {}).get('target_points', None)
+    if target_points:
+        log_print(f"타겟 포인트: {', '.join(target_points)}")
+
+    # Autoencoder 사용 여부 확인
+    use_autoencoder = config['learning_model']['architecture']['features'].get('use_autoencoder', False)
+
+    if use_autoencoder and PointDetectorDataSetWithAutoencoder is not None:
+        log_print("Autoencoder 기반 특성 추출 사용")
+        encoder_path = config['learning_model']['architecture']['features'].get('encoder_path', '../model/autoencoder_16x16_best.pth')
+
+        # DataSetWithAutoencoder 사용
+        train_dataset = PointDetectorDataSetWithAutoencoder(
+            source_folder=str(data_path),
+            labels_file=config['data']['labels_file'],
+            detector=detector,
+            mode='train',
+            config=dataset_config,
+            augment=config['training']['augmentation']['enabled'],
+            extract_features=True,  # Autoencoder는 항상 사전 추출
+            encoder_path=encoder_path,
+            target_points=target_points  # 타겟 포인트 전달
+        )
+    else:
+        # 기존 DataSet 사용
+        train_dataset = PointDetectorDataSet(
+            source_folder=str(data_path),
+            labels_file=config['data']['labels_file'],
+            detector=detector,
+            mode='train',
+            config=dataset_config,
+            augment=config['training']['augmentation']['enabled'],
+            extract_features=extract_features,
+            target_points=target_points  # 타겟 포인트 전달
+        )
 
     # max_train_images 설정 확인 (DataSet에서 이미 처리됨)
     if max_train_images > 0:
         log_print(f"max_train_images 설정: {max_train_images}개")
 
-    val_dataset = PointDetectorDataSet(
-        source_folder=str(data_path),
-        labels_file=config['data']['labels_file'],
-        detector=detector,
-        mode='val',
-        config=dataset_config,
-        augment=False,
-        extract_features=extract_features
-    )
+    if use_autoencoder and PointDetectorDataSetWithAutoencoder is not None:
+        val_dataset = PointDetectorDataSetWithAutoencoder(
+            source_folder=str(data_path),
+            labels_file=config['data']['labels_file'],
+            detector=detector,
+            mode='val',
+            config=dataset_config,
+            augment=False,
+            extract_features=True,
+            encoder_path=encoder_path,
+            target_points=target_points  # 타겟 포인트 전달
+        )
 
-    test_dataset = PointDetectorDataSet(
-        source_folder=str(data_path),
-        labels_file=config['data']['labels_file'],
-        detector=detector,
-        mode='test',
-        config=dataset_config,
-        augment=False,
-        extract_features=extract_features
-    )
+        test_dataset = PointDetectorDataSetWithAutoencoder(
+            source_folder=str(data_path),
+            labels_file=config['data']['labels_file'],
+            detector=detector,
+            mode='test',
+            config=dataset_config,
+            augment=False,
+            extract_features=True,
+            encoder_path=encoder_path,
+            target_points=target_points  # 타겟 포인트 전달
+        )
+    else:
+        val_dataset = PointDetectorDataSet(
+            source_folder=str(data_path),
+            labels_file=config['data']['labels_file'],
+            detector=detector,
+            mode='val',
+            config=dataset_config,
+            augment=False,
+            extract_features=extract_features,
+            target_points=target_points  # 타겟 포인트 전달
+        )
+
+        test_dataset = PointDetectorDataSet(
+            source_folder=str(data_path),
+            labels_file=config['data']['labels_file'],
+            detector=detector,
+            mode='test',
+            config=dataset_config,
+            augment=False,
+            extract_features=extract_features,
+            target_points=target_points  # 타겟 포인트 전달
+        )
 
     # DataLoader 생성
     batch_size = config['training']['batch_size']
