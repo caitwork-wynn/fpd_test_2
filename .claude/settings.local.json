@@ -22,7 +22,11 @@
       "Bash(timeout 2 python 201.learning_kornia.py)",
       "Bash(timeout 5 python:*)",
       "Bash(timeout 10 python:*)",
-      "Bash(timeout 30 python 200.learning.py)"
+      "Bash(timeout 30 python 200.learning.py)",
+      "Bash(grep:*)",
+      "Bash(timeout:*)",
+      "Bash(move:*)",
+      "Bash(rename:*)"
     ],
     "deny": [],
     "ask": []
