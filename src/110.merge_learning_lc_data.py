@@ -15,6 +15,8 @@ import sys
 import json
 import cv2
 import numpy as np
+from tqdm import tqdm
+import random
 
 # 프로젝트 루트 디렉토리 설정 (src의 상위 디렉토리)
 ROOT_DIR = Path(__file__).parent.parent
@@ -152,6 +154,12 @@ def calculate_floor_coords(detected, bbox, target_size):
     """detected 좌표를 crop된 이미지의 좌표로 변환합니다."""
     floor_x = (detected['x'] - bbox['x']) / bbox['width'] * target_size
     floor_y = (detected['y'] - bbox['y']) / bbox['height'] * target_size
+    # 반올림하여 정수로 변환
+    floor_x = int(round(floor_x))
+    floor_y = int(round(floor_y))
+    # 0-target_size 범위로 클리핑
+    floor_x = max(0, min(target_size - 1, floor_x))
+    floor_y = max(0, min(target_size - 1, floor_y))
     return floor_x, floor_y
 
 def crop_and_resize_image(image, bbox, target_size):
@@ -195,8 +203,8 @@ def parse_frames_json(folder_path, folder_name, target_size=224):
 
     print(f"  총 프레임 수: {total_frames}")
 
-    # 각 프레임 처리
-    for frame_idx, frame in enumerate(frames):
+    # 각 프레임 처리 (프로그레스 바 추가)
+    for frame_idx, frame in enumerate(tqdm(frames, desc="    프레임 처리", unit="frame", leave=False)):
         timestamp = frame.get('timestamp', '').replace(':', '').replace('-', '')
         images = frame.get('images', {})
 
@@ -252,8 +260,8 @@ def parse_frames_json(folder_path, folder_name, target_size=224):
                 # floor 좌표 계산
                 floor_x, floor_y = calculate_floor_coords(detected, bbox, target_size)
 
-                # 중심점은 crop된 이미지의 중앙
-                center_x = center_y = target_size / 2
+                # 중심점은 crop된 이미지의 중앙 (정수로)
+                center_x = center_y = int(target_size / 2)
 
                 # 파일명 생성
                 filename = f"{folder_name}-{timestamp}-{cctv_no}-obj{obj_id}.jpg"
@@ -276,10 +284,6 @@ def parse_frames_json(folder_path, folder_name, target_size=224):
 
                 data.append(record)
 
-        # 진행 상황 표시
-        if (frame_idx + 1) % 10 == 0 or frame_idx == total_frames - 1:
-            print(f"    프레임 처리: {frame_idx + 1}/{total_frames}")
-
     print(f"  처리된 이미지: {processed_images}, 건너뛴 이미지: {skipped_images}")
 
     return data
@@ -287,12 +291,12 @@ def parse_frames_json(folder_path, folder_name, target_size=224):
 def parse_labels(labels_path, format_type, folder_name):
     """labels.txt 파일을 파싱하여 통합 형식으로 변환합니다."""
     data = []
-    
+
     with open(labels_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
-    
-    # 헤더 건너뛰기
-    for line in lines[1:]:
+
+    # 헤더 건너뛰기, 프로그레스 바 추가
+    for line in tqdm(lines[1:], desc="    레이블 파싱", unit="line", leave=False):
         line = line.strip()
         if not line:
             continue
@@ -345,7 +349,8 @@ def copy_images(data, source_folder, learning_path, format_type=None):
     copied = 0
     failed = 0
 
-    for record in data:
+    # 프로그레스 바 추가
+    for record in tqdm(data, desc="    이미지 처리", unit="file", leave=False):
         dest_file = learning_path / record['filename']
 
         if format_type == 3 and 'cropped_image' in record:
@@ -376,25 +381,63 @@ def copy_images(data, source_folder, learning_path, format_type=None):
 def update_merged_labels(data, learning_path):
     """통합 labels.txt 파일을 업데이트합니다."""
     labels_file = learning_path / "labels.txt"
-    
+
     # 헤더 확인 및 작성
     write_header = not labels_file.exists() or labels_file.stat().st_size == 0
-    
+
     with open(labels_file, 'a', encoding='utf-8') as f:
         if write_header:
             # 유형 1 형식의 헤더 작성
             f.write("ID,투명도,파일명,center_x,center_y,floor_x,floor_y,front_x,front_y,side_x,side_y\n")
-        
-        # 데이터 추가
-        for record in data:
+
+        # 데이터 추가 (프로그레스 바 추가)
+        for record in tqdm(data, desc="    레이블 저장", unit="record", leave=False):
+            # 좌표값을 정수로 변환 (실수형인 경우 반올림)
+            def to_int(val):
+                try:
+                    return str(int(round(float(val))))
+                except (ValueError, TypeError):
+                    return str(val)
+
             line = f"{record['id']},{record['transparency']},{record['filename']},"
-            line += f"{record['center_x']},{record['center_y']},"
-            line += f"{record['floor_x']},{record['floor_y']},"
-            line += f"{record['front_x']},{record['front_y']},"
-            line += f"{record['side_x']},{record['side_y']}\n"
+            line += f"{to_int(record['center_x'])},{to_int(record['center_y'])},"
+            line += f"{to_int(record['floor_x'])},{to_int(record['floor_y'])},"
+            line += f"{to_int(record['front_x'])},{to_int(record['front_y'])},"
+            line += f"{to_int(record['side_x'])},{to_int(record['side_y'])}\n"
             f.write(line)
-    
+
     return len(data)
+
+def collect_data_from_folder(folder):
+    """폴더에서 데이터만 수집합니다 (파일 복사 없이)."""
+    folder_name = folder.name
+    print(f"  분석 중: {folder_name}")
+
+    # 형식 자동 판별
+    format_type = detect_format(folder)
+    if format_type is None:
+        print(f"    경고: {folder_name}에 처리할 수 있는 데이터가 없습니다.")
+        return []
+
+    # 형식별 처리
+    if format_type == 3:
+        # 유형 3: frames.json 기반 처리
+        data = parse_frames_json(folder, folder_name)
+        # 각 레코드에 원본 폴더와 형식 정보 추가
+        for record in data:
+            record['source_folder'] = folder
+            record['format_type'] = format_type
+    else:
+        # 유형 1, 2: 기존 labels.txt 처리
+        labels_path = folder / "labels.txt"
+        data = parse_labels(labels_path, format_type, folder_name)
+        # 각 레코드에 원본 폴더와 형식 정보 추가
+        for record in data:
+            record['source_folder'] = folder
+            record['format_type'] = format_type
+
+    print(f"    발견된 레코드: {len(data)}개")
+    return data
 
 def process_single_folder(folder, learning_path):
     """단일 폴더를 처리합니다."""
@@ -445,29 +488,139 @@ def process_single_folder(folder, learning_path):
         'failed': failed
     }
 
+def process_selected_data(selected_data, learning_path):
+    """선택된 데이터만 처리합니다."""
+    print(f"\n선택된 {len(selected_data)}개 데이터를 처리합니다...")
+
+    # 폴더별로 데이터 그룹화
+    folder_groups = {}
+    for record in selected_data:
+        folder = record['source_folder']
+        if folder not in folder_groups:
+            folder_groups[folder] = []
+        folder_groups[folder].append(record)
+
+    total_copied = 0
+    total_failed = 0
+
+    # 각 폴더별로 처리
+    for folder, records in tqdm(folder_groups.items(), desc="폴더별 처리"):
+        format_type = records[0]['format_type'] if records else None
+
+        # 이미지 복사
+        copied, failed = copy_images(records, folder, learning_path, format_type)
+        total_copied += copied
+        total_failed += failed
+
+    # labels.txt 업데이트
+    update_merged_labels(selected_data, learning_path)
+
+    return total_copied, total_failed
+
+def get_user_sample_size(total_count):
+    """사용자로부터 샘플 크기를 입력받습니다."""
+    print(f"\n총 사용 가능한 데이터: {total_count:,}개")
+    print("\n몇 개의 데이터를 사용하시겠습니까?")
+    print("  - 숫자 입력 (예: 5000)")
+    print("  - 백분율 입력 (예: 10%)")
+    print("  - 전체 사용: all")
+    print("  - 취소: 0")
+
+    while True:
+        user_input = input("\n입력: ").strip().lower()
+
+        # 취소
+        if user_input == '0':
+            return 0
+
+        # 전체 선택
+        if user_input == 'all':
+            return total_count
+
+        # 백분율 처리
+        if user_input.endswith('%'):
+            try:
+                percentage = float(user_input[:-1])
+                if 0 < percentage <= 100:
+                    sample_size = int(total_count * percentage / 100)
+                    print(f"{percentage}% = {sample_size:,}개를 선택합니다.")
+                    return sample_size
+                else:
+                    print("백분율은 0과 100 사이여야 합니다.")
+            except ValueError:
+                print("올바른 백분율 형식이 아닙니다.")
+
+        # 숫자 처리
+        else:
+            try:
+                sample_size = int(user_input)
+                if 0 < sample_size <= total_count:
+                    return sample_size
+                else:
+                    print(f"1과 {total_count:,} 사이의 숫자를 입력하세요.")
+            except ValueError:
+                print("올바른 숫자를 입력하세요.")
+
 def main():
     """메인 실행 함수"""
-    print("=== 학습 데이터 병합 도구 ===")
+    print("=== 학습 데이터 병합 도구 (랜덤 샘플링) ===")
     print("data/base의 폴더를 선택하여 data/learning으로 병합합니다.")
-    
+
     # 1. 폴더 선택 (다중 선택 가능)
     selected_folders = list_and_select_folders()
-    
-    # 2. data/learning 디렉토리 생성
+
+    # 2. 모든 폴더에서 데이터 수집 (파일 복사 없이)
+    print(f"\n=== 데이터 수집 중 ===")
+    all_data = []
+
+    for folder in tqdm(selected_folders, desc="폴더 분석", unit="folder"):
+        folder_data = collect_data_from_folder(folder)
+        all_data.extend(folder_data)
+
+    total_available = len(all_data)
+
+    if total_available == 0:
+        print("\n사용 가능한 데이터가 없습니다.")
+        sys.exit(0)
+
+    # 3. 사용자에게 샘플 크기 입력 받기
+    sample_size = get_user_sample_size(total_available)
+
+    if sample_size == 0:
+        print("작업을 취소합니다.")
+        sys.exit(0)
+
+    # 4. 랜덤 샘플링
+    if sample_size < total_available:
+        print(f"\n{sample_size:,}개의 데이터를 랜덤하게 선택합니다...")
+        selected_data = random.sample(all_data, sample_size)
+        print("선택 완료!")
+
+        # 샘플 미리보기
+        print("\n[선택된 데이터 샘플 (처음 5개)]")
+        for i, record in enumerate(selected_data[:5], 1):
+            print(f"  {i}. {record['filename']} (ID: {record['id']})")
+        if sample_size > 5:
+            print(f"  ... 그 외 {sample_size-5:,}개")
+    else:
+        selected_data = all_data
+        print(f"\n전체 {total_available:,}개 데이터를 사용합니다.")
+
+    # 5. data/learning 디렉토리 준비
     learning_path = ROOT_DIR / "data" / "learning"
     learning_path.mkdir(parents=True, exist_ok=True)
-    
-    # 3. 기존 데이터 확인
+
+    # 기존 데이터 확인
     merged_labels = learning_path / "labels.txt"
     existing_records = 0
     if merged_labels.exists():
         with open(merged_labels, 'r', encoding='utf-8') as f:
             existing_records = sum(1 for _ in f) - 1  # 헤더 제외
-        
+
         if existing_records > 0:
-            print(f"\n기존 레코드가 {existing_records}개 있습니다.")
+            print(f"\n기존 레코드가 {existing_records:,}개 있습니다.")
             action = input("어떻게 처리하시겠습니까? (a: 추가, r: 초기화, c: 취소): ").strip().lower()
-            
+
             if action == 'c':
                 print("작업을 취소합니다.")
                 sys.exit(0)
@@ -477,57 +630,30 @@ def main():
                 # 이미지 파일도 삭제할지 확인
                 delete_images = input("이미지 파일도 모두 삭제하시겠습니까? (y/n): ").strip().lower()
                 if delete_images == 'y':
-                    for img_file in learning_path.glob("*.png"):
-                        img_file.unlink()
-                    for img_file in learning_path.glob("*.jpg"):
+                    print("기존 이미지 삭제 중...")
+                    for img_file in tqdm(list(learning_path.glob("*.png")) + list(learning_path.glob("*.jpg")),
+                                       desc="이미지 삭제", leave=False):
                         img_file.unlink()
                     print("기존 데이터를 모두 삭제했습니다.")
                 else:
                     print("labels.txt만 초기화했습니다.")
-    
-    # 4. 각 폴더 처리
-    print(f"\n=== {len(selected_folders)}개 폴더 처리 시작 ===")
-    
-    results = []
-    total_records = 0
-    total_copied = 0
-    total_failed = 0
-    
-    for folder in selected_folders:
-        result = process_single_folder(folder, learning_path)
-        if result:
-            results.append(result)
-            total_records += result['records']
-            total_copied += result['copied']
-            total_failed += result['failed']
-    
-    # 5. 최종 보고
-    print(f"\n=== 병합 완료 ===")
-    print(f"처리된 폴더: {len(results)}개 / {len(selected_folders)}개")
-    print(f"총 레코드: {total_records}개")
-    print(f"복사된 이미지: {total_copied}개")
-    if total_failed > 0:
-        print(f"실패한 이미지: {total_failed}개")
-    
-    # 폴더별 요약
-    if len(results) > 0:
-        print(f"\n=== 폴더별 요약 ===")
-        for result in results:
-            print(f"{result['folder']}:")
-            print(f"  - 형식: {result['format']}")
-            print(f"  - 레코드: {result['records']}개")
-            if result['format'] == "유형 3 (frames.json)":
-                print(f"  - 저장: {result['copied']}개")
-            else:
-                print(f"  - 복사: {result['copied']}개")
-            if result['failed'] > 0:
-                print(f"  - 실패: {result['failed']}개")
-    
+
+    # 6. 선택된 데이터 처리
+    print(f"\n=== 데이터 처리 시작 ===")
+    copied, failed = process_selected_data(selected_data, learning_path)
+
+    # 7. 최종 보고
+    print(f"\n=== 처리 완료 ===")
+    print(f"선택된 데이터: {len(selected_data):,}개")
+    print(f"복사된 이미지: {copied:,}개")
+    if failed > 0:
+        print(f"실패한 이미지: {failed}개")
+
     # 현재 통합 파일 상태
     if merged_labels.exists():
         with open(merged_labels, 'r', encoding='utf-8') as f:
             final_total = sum(1 for _ in f) - 1  # 헤더 제외
-        print(f"\n통합 labels.txt 전체 레코드 수: {final_total}개")
+        print(f"\n통합 labels.txt 전체 레코드 수: {final_total:,}개")
 
 if __name__ == "__main__":
     main()
