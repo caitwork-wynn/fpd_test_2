@@ -624,7 +624,30 @@ def main():
                     'timestamp': datetime.now().isoformat()
                 }, f, indent=2, ensure_ascii=False)
 
-            log_print(f"\n[BEST] 모델 저장 완료! (Epoch {epoch}, Loss: {val_loss:.6f})")
+            # Best 모델 저장 시 오차 분석 표시 (error_analysis와 동일 형식)
+            log_print(f"\n{'='*60}")
+            log_print(f"[BEST MODEL SAVED] Epoch {epoch}")
+            log_print(f"{'='*60}")
+
+            # display_error_analysis 함수 활용하여 동일한 형식으로 출력
+            output_lines = display_error_analysis(
+                all_val_errors,
+                epoch=epoch,
+                title=f"=== Epoch {epoch} 오차 분석 (BEST) ==="
+            )
+            for line in output_lines:
+                log_print(line)
+
+            # 추가 정보
+            log_print(f"Validation Loss: {val_loss:.6f}")
+            if 'previous_best_loss' in locals() and previous_best_loss != float('inf'):
+                improvement = previous_best_loss - val_loss
+                log_print(f"Improvement: {improvement:.6f} ({(improvement/previous_best_loss)*100:.2f}%)")
+
+            log_print(f"{'='*60}\n")
+
+            # 이전 best loss 저장
+            previous_best_loss = val_loss
 
             # best 로거에 기록
             if best_logger:

@@ -1,5 +1,5 @@
 learning_model:
-  source: 'model_defs/multi_point_model_kornia.py'
+  source: 'model_defs/multi_point_model_pytorch.py'
   # 아키텍처 설정
   architecture:
     # FPD 아키텍처 사용 여부 (true: FPD 분류 기반 회귀, false: 기존 MLP)
@@ -8,19 +8,12 @@ learning_model:
     features:
       image_size: [112, 112]
       grid_size: 7
-      use_color_hist: true
-      use_hsv: true
-      use_gradient: true
-      use_lbp: true
-      use_gabor: true
-      use_hardnet: true  # HardNet으로 대체하여 ONNX 호환성 개선
-      use_hog: false      # HOG 비활성화 (성능 개선 필요)
   # 모델 저장 설정
   checkpointing:
     save_dir: '../model'
     save_best_only: false
-    save_frequency: 10            # 에폭 단위
-    save_file_name: 'multi_point_kornia'  # 모델 파일명 (fpd_all.pth, fpd_all_best.pth)
+    save_frequency: 1000            # 에폭 단위
+    save_file_name: 'multi_point_pytorch'  # Model file name for PyTorch
     
 # 데이터
 data:
@@ -39,7 +32,7 @@ features:
 # 학습 설정
 training:
   batch_size: 512
-  epochs: 1000000
+  epochs: 100000000
   learning_rate: 0.001
   weight_decay: 0.01
   optimizer: 'adamw'  # adam, adamw, sgd
@@ -76,7 +69,7 @@ training:
   # 오차 분석 설정
   error_analysis:
     enabled: true               # 오차 분석 기능 활성화
-    interval: 10                 # 오차 분석 실행 간격 (에폭 단위)
+    interval: 1000                 # 오차 분석 실행 간격 (에폭 단위)
     save_raw_data: true         # 오차 원천 데이터 저장 여부
     results_dir: '../result'   # 오차 데이터 저장 디렉토리
 

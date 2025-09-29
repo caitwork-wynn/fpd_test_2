@@ -4,6 +4,7 @@ PyTorch 기반 설정 가능한 다중 포인트 검출 모델
 - 유연한 아키텍처 설정
 - Dropout, BatchNorm 지원
 - 다양한 활성화 함수 지원
+- 200.learning.py와 호환
 """
 
 import torch
@@ -12,12 +13,22 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 import cv2
+from torch.utils.data import Dataset
+import random
+import os
+from pathlib import Path
+from tqdm import tqdm
+import sys
+
+# util 폴더를 path에 추가
+sys.path.append(str(Path(__file__).parent.parent))
+from util.data_augmentation import apply_crop_augmentation
 
 
 class ConfigurableMLPModel(nn.Module):
     """설정 가능한 MLP 모델"""
     MODEL_NAME = "mlp_configurable"
-    
+
     def __init__(self, config: Dict):
         """
         Args:
@@ -104,29 +115,44 @@ class ConfigurableMLPModel(nn.Module):
                 nn.init.constant_(module.weight, 1)
                 nn.init.constant_(module.bias, 0)
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """순전파"""
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """순전파 - 200.learning.py와 호환되는 딕셔너리 반환"""
         # 은닉층들
         for i, layer in enumerate(self.layers):
             x = layer(x)
-            
+
             # Batch normalization
             if self.use_batch_norm and i < len(self.batch_norms):
                 x = self.batch_norms[i](x)
-            
+
             # Activation
             x = self.activation(x)
-            
+
             # Dropout
             if i < len(self.dropouts):
                 x = self.dropouts[i](x)
-        
+
         # 출력층 (활성화 함수 없음)
         x = self.output_layer(x)
-        
-        return x
+
+        # 딕셔너리로 반환 (200.learning.py 호환)
+        return {'coordinates': x}
+
+    def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor, sigma: float = 1.0) -> torch.Tensor:
+        """손실 계산 (200.learning.py 호환)
+
+        Args:
+            outputs: 모델 출력 {'coordinates': ...}
+            targets: 타겟 좌표
+            sigma: soft label sigma (사용 안 함)
+
+        Returns:
+            MSE 손실
+        """
+        predictions = outputs['coordinates']
+        return F.mse_loss(predictions, targets)
     
-    def predict(self, x: torch.Tensor) -> torch.Tensor:
+    def predict(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """추론 모드에서 예측"""
         self.eval()
         with torch.no_grad():
@@ -351,8 +377,8 @@ class MultiPointDetectorPyTorch:
         # 예측
         self.model.eval()
         with torch.no_grad():
-            predictions = self.model(features_tensor)
-            predictions = predictions.cpu().numpy()[0]
+            outputs = self.model(features_tensor)
+            predictions = outputs['coordinates'].cpu().numpy()[0]
         
         # 정규화된 좌표를 112x112 픽셀 좌표로 변환
         # 정규화 범위: x는 -112~224, y는 0~224
@@ -417,3 +443,504 @@ class MultiPointDetectorPyTorch:
             return checkpoint['optimizer_state_dict']
         
         return None
+
+
+class DataSet(Dataset):
+    """다중 포인트 검출 데이터셋 (PyTorch 버전)"""
+
+    def __init__(self,
+                 source_folder: str,
+                 labels_file: str,
+                 detector: 'PointDetector',
+                 mode: str = 'train',  # 'train', 'val', 'test'
+                 config: Dict = None,
+                 augment: bool = True,
+                 feature_mean: Optional[np.ndarray] = None,
+                 feature_std: Optional[np.ndarray] = None,
+                 extract_features: bool = False):
+        """
+        Args:
+            source_folder: 이미지 폴더 경로
+            labels_file: 레이블 파일명
+            detector: 특징 추출용 검출기
+            mode: 'train', 'val', 'test'
+            config: 설정 딕셔너리
+            augment: 데이터 증강 여부
+            feature_mean: 특징 정규화용 평균
+            feature_std: 특징 정규화용 표준편차
+            extract_features: True면 특징을 미리 추출하여 메모리에 캐싱
+        """
+        self.source_folder = source_folder
+        self.detector = detector
+        self.mode = mode
+        self.config = config or {}
+        self.augment = augment and (mode == 'train')
+        self.feature_mean = feature_mean
+        self.feature_std = feature_std
+        self.extract_features = extract_features
+
+        # 설정 읽기
+        self.test_id_suffix = str(config['data_split']['test_id_suffix'])
+        self.val_ratio = config['data_split']['validation_ratio']
+        self.augment_count = config['training']['augmentation']['augment_count'] if self.augment else 0
+        self.image_size = tuple(config['features']['image_size'])
+
+        # max_train_images 설정 읽기
+        self.max_train_images = config.get('data', {}).get('max_train_images', 0)
+
+        # 크롭 증강 설정
+        self.crop_config = config['training']['augmentation'].get('crop', {})
+        self.crop_enabled = self.crop_config.get('enabled', False) and self.augment
+
+        # 좌표 정규화 범위 설정 (PyTorch 모델 기본 설정)
+        coord_range = config['training']['augmentation'].get('coordinate_range', {})
+        width = self.image_size[0]
+        height = self.image_size[1]
+        self.coord_min_x = coord_range.get('x_min_ratio', -1.0) * width  # -width
+        self.coord_max_x = coord_range.get('x_max_ratio', 2.0) * width   # width * 2
+        self.coord_min_y = coord_range.get('y_min_ratio', 0.0) * height   # 0
+        self.coord_max_y = coord_range.get('y_max_ratio', 2.0) * height   # height * 2
+
+        # 데이터 로드
+        self.data = []
+        self.load_data(labels_file)
+
+        # 이미지와 타겟 저장 (메모리에 미리 로드)
+        self.images = []  # 이미지 저장
+        self.features = []  # 추출된 특징 저장 (extract_features=True일 때)
+        self.targets = []
+        self.metadata = []
+
+        if self.extract_features:
+            self.precompute_features()
+        else:
+            self.precompute_data()
+
+        print(f"{mode.upper()} 데이터셋: {len(self.features) if self.extract_features else len(self.images)}개 샘플")
+
+    def load_data(self, labels_file: str):
+        """레이블 파일에서 데이터 로드 및 분할"""
+        labels_path = os.path.join(self.source_folder, labels_file)
+
+        with open(labels_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        all_train_data = []
+        test_data = []
+
+        # 헤더 스킵하고 처리
+        for idx, line in enumerate(lines[1:], 1):
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split(',')
+            if len(parts) < 11:
+                continue
+
+            # ID와 파일명
+            data_id = parts[0]  # ID 컬럼
+            filename = parts[2]
+
+            # 좌표 파싱 (실제 이미지 픽셀 좌표)
+            sample = {
+                'id': data_id,
+                'filename': filename,
+                'center_x': int(parts[3]),
+                'center_y': int(parts[4]),
+                'floor_x': int(parts[5]) if parts[5] != '0' else int(parts[3]),
+                'floor_y': int(parts[6]) if parts[6] != '0' else int(parts[4]),
+                'front_x': int(parts[7]) if parts[7] != '0' else int(parts[3]),
+                'front_y': int(parts[8]) if parts[8] != '0' else int(parts[4]),
+                'side_x': int(parts[9]) if parts[9] != '0' else int(parts[3]),
+                'side_y': int(parts[10]) if parts[10] != '0' else int(parts[4])
+            }
+
+            # ID 끝자리로 train/test 분리
+            if data_id.endswith(self.test_id_suffix):
+                test_data.append(sample)
+            else:
+                all_train_data.append(sample)
+
+        print(f"전체 데이터: Train {len(all_train_data)}개, Test {len(test_data)}개")
+
+        # max_train_images 적용
+        if self.max_train_images > 0 and self.mode != 'test':
+            all_train_data = all_train_data[:self.max_train_images]
+            print(f"max_train_images 설정으로 train 데이터를 {len(all_train_data)}개로 제한")
+
+        # mode에 따라 데이터 할당
+        if self.mode == 'test':
+            self.data = test_data
+        else:
+            # train/val 분할
+            random.seed(self.config['data_split']['random_seed'])
+            random.shuffle(all_train_data)
+
+            val_size = int(len(all_train_data) * self.val_ratio)
+
+            if self.mode == 'val':
+                self.data = all_train_data[:val_size]
+            else:  # train
+                self.data = all_train_data[val_size:]
+
+    def normalize_coordinates(self, x: float, y: float) -> Tuple[float, float]:
+        """좌표를 min-max 범위로 정규화
+
+        Args:
+            x: x 좌표 (픽셀)
+            y: y 좌표 (픽셀)
+
+        Returns:
+            정규화된 좌표 (0~1 범위)
+        """
+        # Min-Max 정규화
+        norm_x = (x - self.coord_min_x) / (self.coord_max_x - self.coord_min_x)
+        norm_y = (y - self.coord_min_y) / (self.coord_max_y - self.coord_min_y)
+
+        # 클리핑 (0~1 범위)
+        norm_x = np.clip(norm_x, 0, 1)
+        norm_y = np.clip(norm_y, 0, 1)
+
+        return norm_x, norm_y
+
+    def denormalize_coordinates(self, norm_x: float, norm_y: float) -> Tuple[float, float]:
+        """정규화된 좌표를 원본 범위로 복원
+
+        Args:
+            norm_x: 정규화된 x 좌표 (0~1)
+            norm_y: 정규화된 y 좌표 (0~1)
+
+        Returns:
+            원본 좌표 (픽셀)
+        """
+        x = norm_x * (self.coord_max_x - self.coord_min_x) + self.coord_min_x
+        y = norm_y * (self.coord_max_y - self.coord_min_y) + self.coord_min_y
+
+        return x, y
+
+    def precompute_features(self):
+        """모든 데이터의 특징을 미리 추출하여 저장"""
+        print(f"{self.mode.upper()} 데이터셋 특징 추출 중...")
+
+        for sample in tqdm(self.data, desc="특징 추출", disable=False):
+            # 이미지 로드
+            image_path = os.path.join(self.source_folder, sample['filename'])
+            orig_image = cv2.imread(image_path)
+
+            if orig_image is None:
+                print(f"Warning: 이미지 로드 실패 - {image_path}")
+                orig_image = np.zeros((*self.image_size, 3), dtype=np.uint8)
+                orig_h, orig_w = self.image_size
+            else:
+                orig_h, orig_w = orig_image.shape[:2]
+
+            # 원본 이미지의 좌표 (실제 픽셀 좌표)
+            coords_orig = {
+                'center_x': sample['center_x'],
+                'center_y': sample['center_y'],
+                'floor_x': sample['floor_x'],
+                'floor_y': sample['floor_y'],
+                'front_x': sample['front_x'],
+                'front_y': sample['front_y'],
+                'side_x': sample['side_x'],
+                'side_y': sample['side_y']
+            }
+
+            # 1. 원본 이미지 처리 (단순 리사이즈)
+            image_112 = cv2.resize(orig_image, self.image_size)
+
+            # 원본 이미지 크기에서 112x112로 좌표 변환
+            scale_x = self.image_size[0] / orig_w
+            scale_y = self.image_size[1] / orig_h
+
+            coords_112 = {}
+            for key in ['center', 'floor', 'front', 'side']:
+                coords_112[f'{key}_x'] = coords_orig[f'{key}_x'] * scale_x
+                coords_112[f'{key}_y'] = coords_orig[f'{key}_y'] * scale_y
+
+            # 특징 추출
+            features = self.detector.detector.extract_features(image_112)
+
+            # 특징 정규화 (제공된 경우)
+            if self.feature_mean is not None and self.feature_std is not None:
+                features = (features - self.feature_mean) / (self.feature_std + 1e-8)
+
+            # 좌표 정규화 (min-max 방식)
+            targets = []
+            for key in ['center', 'floor', 'front', 'side']:
+                x = coords_112[f'{key}_x']
+                y = coords_112[f'{key}_y']
+                norm_x, norm_y = self.normalize_coordinates(x, y)
+                targets.extend([norm_x, norm_y])
+
+            targets = np.array(targets, dtype=np.float32)
+
+            # 원본 데이터 저장
+            self.features.append(torch.FloatTensor(features))
+            self.targets.append(torch.FloatTensor(targets))
+            self.metadata.append({
+                'filename': sample['filename'],
+                'id': sample['id'],
+                'augmented': False,
+                'aug_idx': 0
+            })
+
+            # 2. 크롭 증강 처리 (train 모드에서만)
+            if self.mode == 'train' and self.augment:
+                for aug_idx in range(self.augment_count):
+                    # 원본 이미지에서 크롭 증강 적용
+                    cropped_112, coords_cropped = apply_crop_augmentation(
+                        orig_image, coords_orig, self.image_size, self.crop_config
+                    )
+
+                    # 특징 추출
+                    features_aug = self.detector.detector.extract_features(cropped_112)
+
+                    # 특징 정규화
+                    if self.feature_mean is not None and self.feature_std is not None:
+                        features_aug = (features_aug - self.feature_mean) / (self.feature_std + 1e-8)
+
+                    # 좌표 정규화
+                    targets_aug = []
+                    for key in ['center', 'floor', 'front', 'side']:
+                        x = coords_cropped[f'{key}_x']
+                        y = coords_cropped[f'{key}_y']
+                        norm_x, norm_y = self.normalize_coordinates(x, y)
+                        targets_aug.extend([norm_x, norm_y])
+
+                    targets_aug = np.array(targets_aug, dtype=np.float32)
+
+                    # 증강 데이터 저장
+                    self.features.append(torch.FloatTensor(features_aug))
+                    self.targets.append(torch.FloatTensor(targets_aug))
+                    self.metadata.append({
+                        'filename': sample['filename'],
+                        'id': sample['id'],
+                        'augmented': True,
+                        'aug_idx': aug_idx + 1
+                    })
+
+    def precompute_data(self):
+        """이미지를 미리 로드하여 저장 (특징 추출 안 함)"""
+        print(f"{self.mode.upper()} 데이터셋 이미지 로드 중...")
+
+        for sample in tqdm(self.data, desc="이미지 로드", disable=False):
+            # 이미지 로드
+            image_path = os.path.join(self.source_folder, sample['filename'])
+            orig_image = cv2.imread(image_path)
+
+            if orig_image is None:
+                print(f"Warning: 이미지 로드 실패 - {image_path}")
+                orig_image = np.zeros((*self.image_size, 3), dtype=np.uint8)
+                orig_h, orig_w = self.image_size
+            else:
+                orig_h, orig_w = orig_image.shape[:2]
+
+            # 원본 이미지의 좌표 (실제 픽셀 좌표)
+            coords_orig = {
+                'center_x': sample['center_x'],
+                'center_y': sample['center_y'],
+                'floor_x': sample['floor_x'],
+                'floor_y': sample['floor_y'],
+                'front_x': sample['front_x'],
+                'front_y': sample['front_y'],
+                'side_x': sample['side_x'],
+                'side_y': sample['side_y']
+            }
+
+            # 1. 원본 이미지 처리 (단순 리사이즈)
+            image_112 = cv2.resize(orig_image, self.image_size)
+
+            # 원본 이미지 크기에서 112x112로 좌표 변환
+            scale_x = self.image_size[0] / orig_w
+            scale_y = self.image_size[1] / orig_h
+
+            coords_112 = {}
+            for key in ['center', 'floor', 'front', 'side']:
+                coords_112[f'{key}_x'] = coords_orig[f'{key}_x'] * scale_x
+                coords_112[f'{key}_y'] = coords_orig[f'{key}_y'] * scale_y
+
+            # 좌표 정규화 (min-max 방식)
+            targets = []
+            for key in ['center', 'floor', 'front', 'side']:
+                x = coords_112[f'{key}_x']
+                y = coords_112[f'{key}_y']
+                norm_x, norm_y = self.normalize_coordinates(x, y)
+                targets.extend([norm_x, norm_y])
+
+            targets = np.array(targets, dtype=np.float32)
+
+            # 원본 데이터 저장
+            self.images.append(image_112)
+            self.targets.append(torch.FloatTensor(targets))
+            self.metadata.append({
+                'filename': sample['filename'],
+                'id': sample['id'],
+                'augmented': False,
+                'aug_idx': 0
+            })
+
+            # 2. 크롭 증강 처리 (train 모드에서만)
+            if self.mode == 'train' and self.augment:
+                for aug_idx in range(self.augment_count):
+                    # 원본 이미지에서 크롭 증강 적용
+                    cropped_112, coords_cropped = apply_crop_augmentation(
+                        orig_image, coords_orig, self.image_size, self.crop_config
+                    )
+
+                    # 좌표 정규화
+                    targets_aug = []
+                    for key in ['center', 'floor', 'front', 'side']:
+                        x = coords_cropped[f'{key}_x']
+                        y = coords_cropped[f'{key}_y']
+                        norm_x, norm_y = self.normalize_coordinates(x, y)
+                        targets_aug.extend([norm_x, norm_y])
+
+                    targets_aug = np.array(targets_aug, dtype=np.float32)
+
+                    # 증강 데이터 저장
+                    self.images.append(cropped_112)
+                    self.targets.append(torch.FloatTensor(targets_aug))
+                    self.metadata.append({
+                        'filename': sample['filename'],
+                        'id': sample['id'],
+                        'augmented': True,
+                        'aug_idx': aug_idx + 1
+                    })
+
+    def __len__(self):
+        return len(self.features) if self.extract_features else len(self.images)
+
+    def __getitem__(self, idx):
+        """미리 계산된 데이터 반환"""
+        metadata = self.metadata[idx]
+        targets = self.targets[idx].clone()
+
+        if self.extract_features:
+            # 특징이 미리 추출된 경우
+            features = self.features[idx].clone()
+
+            # 데이터 증강 (노이즈 추가)
+            if metadata.get('augmented', False) and self.augment:
+                noise_std = self.config['training']['augmentation'].get('noise_std', 0.01)
+                noise = torch.randn_like(features) * noise_std
+                features = features + noise
+
+            return {
+                'data': features,
+                'targets': targets,
+                'filename': metadata['filename'],
+                'id': metadata['id']
+            }
+        else:
+            # 이미지에서 특징 추출
+            image = self.images[idx]
+
+            # 특징 추출
+            features = self.detector.detector.extract_features(image)
+
+            # 특징 정규화 (제공된 경우)
+            if self.detector.feature_mean is not None and self.detector.feature_std is not None:
+                features = (features - self.detector.feature_mean) / (self.detector.feature_std + 1e-8)
+
+            features = torch.FloatTensor(features)
+
+            return {
+                'data': features,
+                'targets': targets,
+                'filename': metadata['filename'],
+                'id': metadata['id']
+            }
+
+
+class PointDetector:
+    """200.learning.py와 호환되는 PyTorch 포인트 검출기 래퍼"""
+
+    def __init__(self, config: Dict, device):
+        """초기화
+
+        Args:
+            config: 전체 설정 딕셔너리 (learning_model + features)
+            device: 디바이스
+        """
+        self.config = config
+        self.device = device
+
+        # 먼저 임시 config로 특징 추출기만 생성
+        temp_config = {
+            'architecture': {
+                'input_dim': 1,  # 임시값
+                'hidden_dims': [1],
+                'output_dim': 8
+            },
+            'features': config['features']
+        }
+
+        # 특징 추출을 위한 검출기 생성
+        self.detector = MultiPointDetectorPyTorch(temp_config, device)
+
+        # 더미 이미지로 실제 특징 차원 계산
+        import numpy as np
+        dummy_image = np.zeros((112, 112, 3), dtype=np.uint8)
+        dummy_features = self.detector.extract_features(dummy_image)
+        actual_input_dim = len(dummy_features)
+
+        print(f"Detected feature dimension: {actual_input_dim}")
+
+        # 실제 차원으로 PyTorch 모델 설정 생성
+        pytorch_config = {
+            'architecture': {
+                'input_dim': actual_input_dim,  # 동적으로 계산된 차원
+                'hidden_dims': [384, 256],  # 기존 아키텍처 유지
+                'output_dim': 8,
+                'dropout_rates': [0.2, 0.15],
+                'activation': 'relu',
+                'use_batch_norm': True
+            },
+            'features': config['features']
+        }
+
+        # 올바른 차원으로 모델 재생성
+        self.detector.model = ConfigurableMLPModel(pytorch_config['architecture'])
+        self.detector.model.to(device)
+        self.model = self.detector.model
+
+        # 정규화 파라미터
+        self.feature_mean = None
+        self.feature_std = None
+
+    def __call__(self, features: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """모델 forward (200.learning.py 호환)
+
+        Args:
+            features: 특징 텐서 [B, feature_dim]
+
+        Returns:
+            {'coordinates': [B, 8]} 형태의 딕셔너리
+        """
+        # 모델 예측
+        coordinates = self.model(features)
+
+        return {
+            'coordinates': coordinates
+        }
+
+    def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor, sigma: float = 1.0) -> torch.Tensor:
+        """손실 계산 (200.learning.py 호환)
+
+        Args:
+            outputs: 모델 출력 {'coordinates': ...}
+            targets: 타겟 좌표
+            sigma: soft label sigma (사용 안 함)
+
+        Returns:
+            MSE 손실
+        """
+        predictions = outputs['coordinates']
+        return F.mse_loss(predictions, targets)
+
+
+# 200.learning.py와의 호환성을 위한 alias
+PointDetectorDataSet = DataSet
+# PointDetector는 이미 정의됨

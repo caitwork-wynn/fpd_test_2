@@ -20,7 +20,8 @@
       "WebSearch",
       "Bash(move src200.learning_pytorch.py src299.learning_pytorch.py)",
       "Bash(timeout 2 python 201.learning_kornia.py)",
-      "Bash(timeout 5 python:*)"
+      "Bash(timeout 5 python:*)",
+      "Bash(timeout 10 python:*)"
     ],
     "deny": [],
     "ask": []

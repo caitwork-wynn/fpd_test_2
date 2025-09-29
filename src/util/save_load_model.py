@@ -45,11 +45,15 @@ def save_model(
 
     # 파일명 결정
     if is_best:
+        # best 모델은 기존 경로 유지
         checkpoint_path = save_path / f"{model_name}_best.pth"
     else:
         if epoch is None:
             raise ValueError("일반 모델 저장 시 epoch 번호가 필요합니다.")
-        checkpoint_path = save_path / f"{model_name}_epoch{epoch}.pth"
+        # epoch 체크포인트는 하위 폴더에 저장
+        epoch_dir = save_path / model_name
+        epoch_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = epoch_dir / f"{model_name}_epoch{epoch}.pth"
 
     # 체크포인트 데이터 구성
     checkpoint_data = {
@@ -100,8 +104,29 @@ def save_model_as_onnx(
         model = model.cpu()
         model.eval()
 
-        # 더미 입력 생성 (고정 크기: 1x3x112x112)
-        dummy_input = torch.randn(1, 3, 112, 112)
+        # 모델로부터 입력 차원 동적으로 구하기
+        if hasattr(model, 'layers') and len(model.layers) > 0:
+            # ConfigurableMLPModel의 경우 (PyTorch 모델)
+            input_dim = model.layers[0].in_features
+            dummy_input = torch.randn(1, input_dim)
+            input_names = ['features']
+            print(f"ONNX 변환: MLP 모델 감지, 입력 차원={input_dim}")
+        elif hasattr(model, 'input_dim'):
+            # input_dim 속성이 있는 경우
+            input_dim = model.input_dim
+            dummy_input = torch.randn(1, input_dim)
+            input_names = ['features']
+            print(f"ONNX 변환: 특징 기반 모델 감지, 입력 차원={input_dim}")
+        elif hasattr(model, 'feature_extractor'):
+            # Kornia 모델 등 이미지 입력 모델
+            dummy_input = torch.randn(1, 3, 112, 112)
+            input_names = ['image']
+            print(f"ONNX 변환: 이미지 입력 모델 감지, shape={dummy_input.shape}")
+        else:
+            # 기본값 (이미지 입력) - 호환성 유지
+            dummy_input = torch.randn(1, 3, 112, 112)
+            input_names = ['image']
+            print(f"ONNX 변환: 기본 이미지 입력 사용, shape={dummy_input.shape}")
 
         # ONNX로 변환
         with torch.no_grad():
@@ -114,10 +139,10 @@ def save_model_as_onnx(
                     export_params=True,
                     opset_version=14,
                     do_constant_folding=True,
-                    input_names=['image'],
+                    input_names=input_names,
                     output_names=['coordinates'],
                     dynamic_axes={
-                        'image': {0: 'batch_size'},
+                        input_names[0]: {0: 'batch_size'},
                         'coordinates': {0: 'batch_size'}
                     },
                     operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
@@ -214,9 +239,16 @@ def find_latest_checkpoint(
     """
     save_path = Path(save_dir)
 
-    # epoch 패턴 매칭
-    pattern = f"{model_name}_epoch*.pth"
-    checkpoint_files = list(save_path.glob(pattern))
+    # epoch 체크포인트는 하위 폴더에서 찾기
+    epoch_dir = save_path / model_name
+    if not epoch_dir.exists():
+        # 하위 폴더가 없으면 기존 경로에서도 찾아보기 (호환성)
+        pattern = f"{model_name}_epoch*.pth"
+        checkpoint_files = list(save_path.glob(pattern))
+    else:
+        # 하위 폴더에서 찾기
+        pattern = f"{model_name}_epoch*.pth"
+        checkpoint_files = list(epoch_dir.glob(pattern))
 
     if not checkpoint_files:
         return None
