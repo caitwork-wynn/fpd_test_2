@@ -368,6 +368,7 @@ def main():
     # 기존 체크포인트 확인 및 로드
     start_epoch = 0
     best_val_loss = float('inf')
+    best_model_time_loaded = None  # 로드된 시간 정보
 
     try:
         # 먼저 epoch 파일 로드 시도 (최신 epoch 파일 우선)
@@ -389,6 +390,7 @@ def main():
             if epoch_checkpoint_path.exists():
                 checkpoint = torch.load(str(epoch_checkpoint_path), map_location=device, weights_only=False)
                 best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                best_model_time_loaded = checkpoint.get('best_model_time', None)
 
                 # feature_mean, feature_std 복원 (있는 경우)
                 if 'feature_mean' in checkpoint:
@@ -417,6 +419,7 @@ def main():
                 checkpoint = torch.load(str(best_checkpoint_path), map_location=device, weights_only=False)
                 start_epoch = checkpoint.get('epoch', 0)
                 best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                best_model_time_loaded = checkpoint.get('best_model_time', None)
 
                 # feature_mean, feature_std 복원 (있는 경우)
                 if 'feature_mean' in checkpoint:
@@ -433,22 +436,32 @@ def main():
 
     # 스케줄러 설정
     scheduler_config = config['training']['scheduler']
+    min_lr = scheduler_config.get('min_lr', 0)
+
     if scheduler_config['type'] == 'reduce_on_plateau':
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
             patience=scheduler_config['patience'],
             factor=scheduler_config['factor'],
-            min_lr=scheduler_config['min_lr']
+            min_lr=min_lr
         )
+    elif scheduler_config['type'] == 'step':
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=scheduler_config['step_size'],
+            gamma=scheduler_config['gamma']
+        )
+        log_print(f"StepLR 스케줄러 설정: step_size={scheduler_config['step_size']}, gamma={scheduler_config['gamma']}, min_lr={min_lr}")
     elif scheduler_config['type'] == 'cosine':
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=config['training']['epochs'],
-            eta_min=scheduler_config['min_lr']
+            eta_min=min_lr
         )
     else:
         scheduler = None
+        log_print("학습률 스케줄러 비활성화")
 
     # 학습 설정
     epochs = config['training']['epochs']
@@ -487,6 +500,19 @@ def main():
     training_log = []
     training_start_time = time.time()
 
+    # 시간 기반 LR 감소 설정
+    time_based_config = config['training']['scheduler'].get('time_based', {})
+    time_based_enabled = time_based_config.get('enabled', False)
+    time_patience_hours = time_based_config.get('patience_hours', 1.0)
+    time_reduce_factor = time_based_config.get('factor', 0.5)
+
+    # best_model_time 초기화 (체크포인트에서 로드되었으면 사용, 없으면 현재 시간)
+    if best_model_time_loaded is not None:
+        best_model_time = best_model_time_loaded
+        log_print(f"Best 모델 시간 복원: {datetime.fromtimestamp(best_model_time).strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        best_model_time = time.time()  # Best 모델 갱신 시각 초기화
+
     # 학습 루프
     for epoch in range(start_epoch + 1, epochs + 1):
         epoch_start_time = time.time()
@@ -503,6 +529,28 @@ def main():
                 scheduler.step(val_loss)
             else:
                 scheduler.step()
+
+            # StepLR에서 min_lr 적용 (StepLR은 기본적으로 min_lr을 지원하지 않음)
+            if isinstance(scheduler, optim.lr_scheduler.StepLR):
+                current_lr = optimizer.param_groups[0]['lr']
+                if current_lr < min_lr:
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = min_lr
+
+        # 시간 기반 LR 감소 체크 (스케줄러 업데이트 이후)
+        if time_based_enabled:
+            current_time = time.time()
+            hours_since_best = (current_time - best_model_time) / 3600
+
+            if hours_since_best >= time_patience_hours:
+                current_lr_before = optimizer.param_groups[0]['lr']
+                new_lr = max(current_lr_before * time_reduce_factor, min_lr)
+
+                if new_lr < current_lr_before:
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = new_lr
+                    log_print(f"[시간 기반 LR 감소] Best 갱신 후 {hours_since_best:.1f}시간 경과 - LR: {current_lr_before:.2e} → {new_lr:.2e}")
+                    best_model_time = current_time  # 타이머 리셋
 
         # 에폭 시간 계산
         epoch_time = time.time() - epoch_start_time
@@ -554,6 +602,19 @@ def main():
             log_print(f"[Epoch {epoch}] 검증 데이터 오차 분석")
             log_print(f"{'='*60}")
 
+            # 추가 정보 출력
+            epochs_since_best = epoch - best_epoch
+            hours_since_best_display = (time.time() - best_model_time) / 3600
+            log_print(f"현재 에폭: {epoch}")
+            log_print(f"마지막 Best 에폭: {best_epoch}")
+            log_print(f"Best 에폭으로부터 경과: {epochs_since_best} 에폭 ({hours_since_best_display:.1f}시간)")
+            log_print(f"현재 학습률: {current_lr:.2e}")
+            log_print(f"현재 검증 손실: {val_loss:.6f}")
+            log_print(f"Best 검증 손실: {best_val_loss:.6f}")
+            if time_based_enabled:
+                log_print(f"시간 기반 LR 감소: {time_patience_hours}시간마다, factor={time_reduce_factor}")
+            log_print(f"-"*60)
+
             # 오차 분석 출력
             output_lines = display_error_analysis(
                 all_val_errors,
@@ -575,7 +636,10 @@ def main():
                         'train_loss': train_loss,
                         'val_loss': val_loss,
                         'learning_rate': current_lr,
-                        'avg_error_pixels': avg_error
+                        'avg_error_pixels': avg_error,
+                        'best_epoch': best_epoch,
+                        'best_val_loss': best_val_loss,
+                        'epochs_since_best': epoch - best_epoch
                     }
                 )
                 log_print(f"오차 분석 저장: {json_path}")
@@ -585,13 +649,15 @@ def main():
             best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
+            best_model_time = time.time()  # Best 모델 갱신 시각 업데이트
 
             # 추가 정보 포함한 체크포인트 데이터
             checkpoint_data = {
                 'epoch': epoch,
                 'best_val_loss': best_val_loss,
                 'val_errors': val_errors,
-                'model_config': config
+                'model_config': config,
+                'best_model_time': best_model_time  # 시간 정보 저장
             }
 
             # feature_mean, feature_std 저장 (있는 경우)

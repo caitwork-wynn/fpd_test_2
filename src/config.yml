@@ -1,5 +1,5 @@
 learning_model:
-  source: 'model_defs/multi_point_model_pytorch.py'
+  source: 'model_defs/multi_point_model_attention.py'
   # 아키텍처 설정
   architecture:
     # FPD 아키텍처 사용 여부 (true: FPD 분류 기반 회귀, false: 기존 MLP)
@@ -13,7 +13,7 @@ learning_model:
     save_dir: '../model'
     save_best_only: false
     save_frequency: 1000            # 에폭 단위
-    save_file_name: 'multi_point_pytorch'  # Model file name for PyTorch
+    save_file_name: 'multi_point_attention'  # Model file name for attention-based model
     
 # 데이터
 data:
@@ -22,7 +22,7 @@ data:
   test_id_suffix: '1'
   validation_ratio: 0.2
   random_seed: 42
-  max_train_images: 200  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
+  max_train_images: 0  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
 
 # 특징 추출 설정
 features:
@@ -41,21 +41,41 @@ training:
 
   # 데이터 증강
   augmentation:
-    enabled: false
-    augment_count: 3  # 원본 데이터당 증강 샘플 수
+    enabled: true
+    augment_count: 5  # 원본 데이터당 증강 샘플 수
     # 크롭 증강 설정
     crop:
       enabled: true
       min_ratio: 0.8  # 최소 크롭 비율 (80%)
       max_ratio: 1.0  # 최대 크롭 비율 (100%)
       max_shift: 0.15  # 최대 이동 비율 (15%)
+    # 좌표 정규화 범위 설정 (112x112 이미지 기준)
+    coordinate_range:
+      x_min_ratio: -1.0   # x 최소: -112 (-width)
+      x_max_ratio: 2.0    # x 최대: 224 (2*width)
+      y_min_ratio: 0.0    # y 최소: 0
+      y_max_ratio: 2.0    # y 최대: 224 (2*height)
 
   # 학습률 스케줄러
   scheduler:
-    type: 'reduce_on_plateau'
-    patience: 20
-    factor: 0.3
-    min_lr: 0.000001
+    type: 'step'  # 'reduce_on_plateau', 'step', 'cosine', 'none' 중 선택
+
+    # ReduceLROnPlateau 설정 (type: 'reduce_on_plateau'일 때 사용)
+    patience: 200        # reduce_on_plateau: 개선 없이 기다릴 에폭 수
+    factor: 0.1         # reduce_on_plateau: 감소 비율
+
+    # StepLR 설정 (type: 'step'일 때 사용)
+    step_size: 10000    # step: 몇 에폭마다 감소
+    gamma: 0.8          # step: 감소 비율 (새 LR = 기존 LR * gamma)
+
+    # 시간 기반 LR 감소 (모든 스케줄러와 병행 사용 가능)
+    time_based:
+      enabled: true              # 시간 기반 감소 활성화
+      patience_hours: 0.3        # Best 모델 갱신 없이 대기할 시간 (시간)
+      factor: 0.7               # 감소 비율 (새 LR = 기존 LR * factor)
+
+    # 공통 설정
+    min_lr: 0.0000001   # 최소 학습률 (이 값 이하로 감소하지 않음)
 
   # Loss 설정
   loss:
