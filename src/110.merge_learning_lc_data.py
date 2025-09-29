@@ -12,6 +12,9 @@ import os
 import shutil
 from pathlib import Path
 import sys
+import json
+import cv2
+import numpy as np
 
 # 프로젝트 루트 디렉토리 설정 (src의 상위 디렉토리)
 ROOT_DIR = Path(__file__).parent.parent
@@ -111,28 +114,175 @@ def list_and_select_folders():
             print(f"입력 오류: {e}")
             print("다시 입력해주세요.")
 
-def detect_format(labels_path):
-    """labels.txt 파일의 형식을 자동으로 판별합니다."""
-    with open(labels_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    
-    # 빈 파일 체크
-    if len(lines) < 2:
-        print(f"  경고: {labels_path}가 비어있거나 데이터가 없습니다.")
-        return None
-    
-    # 첫 번째 데이터 라인 파싱 (헤더 다음 라인)
-    data_line = lines[1].strip()
-    columns = data_line.split(',')
-    num_columns = len(columns)
-    
-    if num_columns == 11:
-        return 1  # 유형 1 (4 point)
-    elif num_columns == 5:
-        return 2  # 유형 2 (1 point)
+def detect_format(folder_path):
+    """폴더의 데이터 형식을 자동으로 판별합니다."""
+    labels_path = folder_path / "labels.txt"
+    frames_json_path = folder_path / "frames.json"
+
+    if labels_path.exists():
+        # 기존 labels.txt 형식 감지
+        with open(labels_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        # 빈 파일 체크
+        if len(lines) < 2:
+            print(f"  경고: {labels_path}가 비어있거나 데이터가 없습니다.")
+            return None
+
+        # 첫 번째 데이터 라인 파싱 (헤더 다음 라인)
+        data_line = lines[1].strip()
+        columns = data_line.split(',')
+        num_columns = len(columns)
+
+        if num_columns == 11:
+            return 1  # 유형 1 (4 point)
+        elif num_columns == 5:
+            return 2  # 유형 2 (1 point)
+        else:
+            print(f"  경고: 알 수 없는 형식입니다. (컬럼 수: {num_columns})")
+            return None
+    elif frames_json_path.exists():
+        # frames.json 파일이 있으면 유형 3
+        return 3
     else:
-        print(f"  경고: 알 수 없는 형식입니다. (컬럼 수: {num_columns})")
+        # 둘 다 없으면 None
         return None
+
+def calculate_floor_coords(detected, bbox, target_size):
+    """detected 좌표를 crop된 이미지의 좌표로 변환합니다."""
+    floor_x = (detected['x'] - bbox['x']) / bbox['width'] * target_size
+    floor_y = (detected['y'] - bbox['y']) / bbox['height'] * target_size
+    return floor_x, floor_y
+
+def crop_and_resize_image(image, bbox, target_size):
+    """이미지에서 bbox 영역을 crop하고 리사이즈합니다."""
+    x = max(0, int(bbox['x']))
+    y = max(0, int(bbox['y']))
+    w = int(bbox['width'])
+    h = int(bbox['height'])
+
+    # 이미지 경계 체크
+    img_h, img_w = image.shape[:2]
+    x2 = min(img_w, x + w)
+    y2 = min(img_h, y + h)
+
+    # Crop
+    cropped = image[y:y2, x:x2]
+
+    # 리사이즈
+    if cropped.size > 0:
+        resized = cv2.resize(cropped, (target_size, target_size))
+        return resized
+    return None
+
+def parse_frames_json(folder_path, folder_name, target_size=224):
+    """frames.json을 읽어 user.json 파일들을 파싱하고 이미지를 처리합니다."""
+    data = []
+    frames_json_path = folder_path / "frames.json"
+
+    # frames.json 읽기
+    try:
+        with open(frames_json_path, 'r', encoding='utf-8') as f:
+            frames_data = json.load(f)
+    except Exception as e:
+        print(f"    경고: frames.json 읽기 실패: {e}")
+        return data
+
+    frames = frames_data.get('frames', [])
+    total_frames = len(frames)
+    processed_images = 0
+    skipped_images = 0
+
+    print(f"  총 프레임 수: {total_frames}")
+
+    # 각 프레임 처리
+    for frame_idx, frame in enumerate(frames):
+        timestamp = frame.get('timestamp', '').replace(':', '').replace('-', '')
+        images = frame.get('images', {})
+
+        # 각 CCTV 이미지 처리
+        for cctv_no, image_rel_path in images.items():
+            # 이미지 경로 구성
+            image_path = folder_path / image_rel_path
+            user_json_path = folder_path / f"{image_rel_path}.user.json"
+
+            # user.json이 없으면 건너뛰기
+            if not user_json_path.exists():
+                skipped_images += 1
+                continue
+
+            # 이미지 파일이 없으면 건너뛰기
+            if not image_path.exists():
+                print(f"    경고: 이미지 파일을 찾을 수 없습니다: {image_path.name}")
+                skipped_images += 1
+                continue
+
+            # user.json 읽기
+            try:
+                with open(user_json_path, 'r', encoding='utf-8') as f:
+                    json_data = json.load(f)
+            except Exception as e:
+                print(f"    경고: JSON 파일 읽기 실패: {user_json_path.name} - {e}")
+                skipped_images += 1
+                continue
+
+            # 이미지 로드
+            image = cv2.imread(str(image_path))
+            if image is None:
+                print(f"    경고: 이미지 로드 실패: {image_path.name}")
+                skipped_images += 1
+                continue
+
+            processed_images += 1
+
+            # 각 객체 처리
+            for obj in json_data.get('objects', []):
+                obj_id = obj.get('objectId', obj.get('id'))
+                bbox = obj.get('bbox')
+                detected = obj.get('detected')
+
+                if not bbox or not detected:
+                    continue
+
+                # 이미지 crop 및 리사이즈
+                cropped_image = crop_and_resize_image(image, bbox, target_size)
+                if cropped_image is None:
+                    continue
+
+                # floor 좌표 계산
+                floor_x, floor_y = calculate_floor_coords(detected, bbox, target_size)
+
+                # 중심점은 crop된 이미지의 중앙
+                center_x = center_y = target_size / 2
+
+                # 파일명 생성
+                filename = f"{folder_name}-{timestamp}-{cctv_no}-obj{obj_id}.jpg"
+
+                record = {
+                    'id': f"{folder_name}-{timestamp}-{cctv_no}-{obj_id}",
+                    'transparency': str(obj.get('confidence', 1.0)),
+                    'filename': filename,
+                    'center_x': str(center_x),
+                    'center_y': str(center_y),
+                    'floor_x': str(floor_x),
+                    'floor_y': str(floor_y),
+                    'front_x': str(floor_x),  # 현재는 floor와 동일
+                    'front_y': str(floor_y),
+                    'side_x': str(floor_x),
+                    'side_y': str(floor_y),
+                    'cropped_image': cropped_image,
+                    'object_type': obj.get('objectType', 'UNKNOWN')
+                }
+
+                data.append(record)
+
+        # 진행 상황 표시
+        if (frame_idx + 1) % 10 == 0 or frame_idx == total_frames - 1:
+            print(f"    프레임 처리: {frame_idx + 1}/{total_frames}")
+
+    print(f"  처리된 이미지: {processed_images}, 건너뛴 이미지: {skipped_images}")
+
+    return data
 
 def parse_labels(labels_path, format_type, folder_name):
     """labels.txt 파일을 파싱하여 통합 형식으로 변환합니다."""
@@ -190,26 +340,37 @@ def parse_labels(labels_path, format_type, folder_name):
     
     return data
 
-def copy_images(data, source_folder, learning_path):
+def copy_images(data, source_folder, learning_path, format_type=None):
     """이미지 파일을 data/learning으로 복사합니다."""
     copied = 0
     failed = 0
-    
+
     for record in data:
-        source_file = source_folder / record['original_filename']
         dest_file = learning_path / record['filename']
-        
-        if source_file.exists():
+
+        if format_type == 3 and 'cropped_image' in record:
+            # 유형 3: crop된 이미지 저장
             try:
-                shutil.copy2(source_file, dest_file)
+                cv2.imwrite(str(dest_file), record['cropped_image'])
                 copied += 1
             except Exception as e:
-                print(f"    경고: {source_file.name} 복사 실패: {e}")
+                print(f"    경고: {record['filename']} 저장 실패: {e}")
                 failed += 1
         else:
-            # 경고 메시지 최소화 (많은 파일 처리 시)
-            failed += 1
-    
+            # 유형 1, 2: 원본 이미지 복사
+            source_file = source_folder / record.get('original_filename', record['filename'])
+
+            if source_file.exists():
+                try:
+                    shutil.copy2(source_file, dest_file)
+                    copied += 1
+                except Exception as e:
+                    print(f"    경고: {source_file.name} 복사 실패: {e}")
+                    failed += 1
+            else:
+                # 경고 메시지 최소화 (많은 파일 처리 시)
+                failed += 1
+
     return copied, failed
 
 def update_merged_labels(data, learning_path):
@@ -239,33 +400,43 @@ def process_single_folder(folder, learning_path):
     """단일 폴더를 처리합니다."""
     folder_name = folder.name
     print(f"\n처리 중: {folder_name}")
-    
-    # labels.txt 확인
-    labels_path = folder / "labels.txt"
-    if not labels_path.exists():
-        print(f"  경고: {labels_path}가 존재하지 않습니다. 건너뜁니다.")
-        return None
-    
+
     # 형식 자동 판별
-    format_type = detect_format(labels_path)
+    format_type = detect_format(folder)
     if format_type is None:
-        print(f"  경고: {folder_name}의 형식을 판별할 수 없습니다. 건너뜁니다.")
+        print(f"  경고: {folder_name}에 처리할 수 있는 데이터가 없습니다. 건너뜁니다.")
         return None
-    
-    format_name = "유형 1 (4 point)" if format_type == 1 else "유형 2 (1 point)"
-    print(f"  형식: {format_name}")
-    
-    # labels.txt 파싱 및 변환
-    data = parse_labels(labels_path, format_type, folder_name)
-    print(f"  파싱된 레코드: {len(data)}개")
-    
-    # 이미지 파일 복사
-    copied, failed = copy_images(data, folder, learning_path)
-    print(f"  이미지 복사: 성공 {copied}개, 실패 {failed}개")
-    
+
+    # 형식별 처리
+    if format_type == 3:
+        # 유형 3: frames.json 기반 처리
+        format_name = "유형 3 (frames.json)"
+        print(f"  형식: {format_name}")
+
+        # frames.json 파싱 및 이미지 처리
+        data = parse_frames_json(folder, folder_name)
+        print(f"  파싱된 레코드: {len(data)}개")
+
+        # crop된 이미지 저장
+        copied, failed = copy_images(data, folder, learning_path, format_type)
+        print(f"  이미지 저장: 성공 {copied}개, 실패 {failed}개")
+    else:
+        # 유형 1, 2: 기존 labels.txt 처리
+        labels_path = folder / "labels.txt"
+        format_name = "유형 1 (4 point)" if format_type == 1 else "유형 2 (1 point)"
+        print(f"  형식: {format_name}")
+
+        # labels.txt 파싱 및 변환
+        data = parse_labels(labels_path, format_type, folder_name)
+        print(f"  파싱된 레코드: {len(data)}개")
+
+        # 이미지 파일 복사
+        copied, failed = copy_images(data, folder, learning_path, format_type)
+        print(f"  이미지 복사: 성공 {copied}개, 실패 {failed}개")
+
     # 통합 labels.txt 업데이트
     added = update_merged_labels(data, learning_path)
-    
+
     return {
         'folder': folder_name,
         'format': format_name,
@@ -345,7 +516,10 @@ def main():
             print(f"{result['folder']}:")
             print(f"  - 형식: {result['format']}")
             print(f"  - 레코드: {result['records']}개")
-            print(f"  - 복사: {result['copied']}개")
+            if result['format'] == "유형 3 (frames.json)":
+                print(f"  - 저장: {result['copied']}개")
+            else:
+                print(f"  - 복사: {result['copied']}개")
             if result['failed'] > 0:
                 print(f"  - 실패: {result['failed']}개")
     

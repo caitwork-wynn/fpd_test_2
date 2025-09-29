@@ -19,7 +19,7 @@ learning_model:
     save_dir: '../model'
     save_best_only: false
     save_frequency: 1000            # 에폭 단위
-    save_file_name: 'floor_only_attention'  # Floor only attention model
+    save_file_name: 'floor_attention'  # Floor only attention model
     
 # 데이터
 data:
