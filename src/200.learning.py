@@ -805,16 +805,9 @@ def main():
                 }, f, indent=2, ensure_ascii=False)
 
             # Best 모델 저장 시 오차 분석 표시 (error_analysis와 동일 형식)
-            best_output_lines = []  # 텍스트 파일 저장용 리스트
-
             log_print(f"\n{'='*60}")
-            best_output_lines.append('='*60)
-
             log_print(f"[BEST MODEL SAVED] Epoch {epoch}")
-            best_output_lines.append(f"[BEST MODEL SAVED] Epoch {epoch}")
-
             log_print(f"{'='*60}")
-            best_output_lines.append('='*60)
 
             # display_error_analysis 함수 활용하여 동일한 형식으로 출력
             output_lines = display_error_analysis(
@@ -824,27 +817,14 @@ def main():
             )
             for line in output_lines:
                 log_print(line)
-                best_output_lines.append(line)
 
             # 추가 정보
             log_print(f"Validation Loss: {val_loss:.6f}")
-            best_output_lines.append(f"Validation Loss: {val_loss:.6f}")
-
             if 'previous_best_loss' in locals() and previous_best_loss != float('inf'):
                 improvement = previous_best_loss - val_loss
-                improvement_line = f"Improvement: {improvement:.6f} ({(improvement/previous_best_loss)*100:.2f}%)"
-                log_print(improvement_line)
-                best_output_lines.append(improvement_line)
+                log_print(f"Improvement: {improvement:.6f} ({(improvement/previous_best_loss)*100:.2f}%)")
 
             log_print(f"{'='*60}\n")
-            best_output_lines.append('='*60)
-
-            # Best 모델 정보를 텍스트 파일로 저장
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            best_txt_path = result_dir / f"best_{save_file_name}_{timestamp}.txt"
-            with open(best_txt_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(best_output_lines))
-            log_print(f"Best 모델 상세 정보 저장: {best_txt_path}")
 
             # 이전 best loss 저장
             previous_best_loss = val_loss
