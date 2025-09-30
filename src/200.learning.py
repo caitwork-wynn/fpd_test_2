@@ -761,20 +761,60 @@ def main():
             checkpoint.update(checkpoint_data)
             torch.save(checkpoint, str(checkpoint_path))
 
-            # Best 모델 정보를 결과 디렉토리에도 기록
+            # Best 모델 정보를 결과 디렉토리에도 기록 (상세 오차 정보 포함)
             best_info_path = result_dir / f"best_epoch_{epoch}.json"
+
+            # 상세 오차 정보 계산
+            detailed_errors = {}
+            all_distances = []
+
+            for point_name, errors in all_val_errors.items():
+                if errors.get('x') and errors.get('y') and errors.get('dist'):
+                    detailed_errors[point_name] = {
+                        'x': {
+                            'mean': float(np.mean(errors['x'])),
+                            'std': float(np.std(errors['x']))
+                        },
+                        'y': {
+                            'mean': float(np.mean(errors['y'])),
+                            'std': float(np.std(errors['y']))
+                        },
+                        'dist': {
+                            'mean': float(np.mean(errors['dist'])),
+                            'std': float(np.std(errors['dist']))
+                        }
+                    }
+                    all_distances.extend(errors['dist'])
+
+            # 전체 오차 계산
+            overall_error = None
+            if all_distances:
+                overall_error = {
+                    'mean': float(np.mean(all_distances)),
+                    'std': float(np.std(all_distances))
+                }
+
             with open(best_info_path, 'w', encoding='utf-8') as f:
                 json.dump({
                     'epoch': epoch,
                     'val_loss': float(val_loss),
-                    'val_errors': {k: float(v) for k, v in val_errors.items()},
+                    'val_errors': detailed_errors,
+                    'val_errors_simple': {k: float(v) for k, v in val_errors.items()},  # 기존 형식 호환성
+                    'overall_error': overall_error,
                     'timestamp': datetime.now().isoformat()
                 }, f, indent=2, ensure_ascii=False)
 
             # Best 모델 저장 시 오차 분석 표시 (error_analysis와 동일 형식)
+            best_output_lines = []  # 텍스트 파일 저장용 리스트
+
             log_print(f"\n{'='*60}")
+            best_output_lines.append('='*60)
+
             log_print(f"[BEST MODEL SAVED] Epoch {epoch}")
+            best_output_lines.append(f"[BEST MODEL SAVED] Epoch {epoch}")
+
             log_print(f"{'='*60}")
+            best_output_lines.append('='*60)
 
             # display_error_analysis 함수 활용하여 동일한 형식으로 출력
             output_lines = display_error_analysis(
@@ -784,14 +824,27 @@ def main():
             )
             for line in output_lines:
                 log_print(line)
+                best_output_lines.append(line)
 
             # 추가 정보
             log_print(f"Validation Loss: {val_loss:.6f}")
+            best_output_lines.append(f"Validation Loss: {val_loss:.6f}")
+
             if 'previous_best_loss' in locals() and previous_best_loss != float('inf'):
                 improvement = previous_best_loss - val_loss
-                log_print(f"Improvement: {improvement:.6f} ({(improvement/previous_best_loss)*100:.2f}%)")
+                improvement_line = f"Improvement: {improvement:.6f} ({(improvement/previous_best_loss)*100:.2f}%)"
+                log_print(improvement_line)
+                best_output_lines.append(improvement_line)
 
             log_print(f"{'='*60}\n")
+            best_output_lines.append('='*60)
+
+            # Best 모델 정보를 텍스트 파일로 저장
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            best_txt_path = result_dir / f"best_{save_file_name}_{timestamp}.txt"
+            with open(best_txt_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(best_output_lines))
+            log_print(f"Best 모델 상세 정보 저장: {best_txt_path}")
 
             # 이전 best loss 저장
             previous_best_loss = val_loss
