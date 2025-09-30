@@ -44,7 +44,7 @@ training:
   # 데이터 증강
   augmentation:
     enabled: true
-    augment_count: 5  # 원본 데이터당 증강 샘플 수
+    augment_count: 4  # 원본 데이터당 증강 샘플 수
     # 크롭 증강 설정
     crop:
       enabled: true
@@ -60,7 +60,9 @@ training:
 
   # 학습률 스케줄러
   scheduler:
+    enabled: false  # 스케줄러를 완전히 비활성화 (고정 학습률 사용)
     type: 'step'  # 'reduce_on_plateau', 'step', 'cosine', 'none' 중 선택
+                  # 'none'으로 설정하면 스케줄러 비활성화 (고정 학습률 사용)
 
     # ReduceLROnPlateau 설정 (type: 'reduce_on_plateau'일 때 사용)
     patience: 200        # reduce_on_plateau: 개선 없이 기다릴 에폭 수
