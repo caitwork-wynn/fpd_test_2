@@ -512,7 +512,11 @@ def main():
     scheduler_config = config['training']['scheduler']
     min_lr = scheduler_config.get('min_lr', 0)
 
-    if scheduler_config['type'] == 'reduce_on_plateau':
+    # 스케줄러 비활성화 체크 (enabled 플래그 또는 type: 'none')
+    if not scheduler_config.get('enabled', True) or scheduler_config['type'] == 'none':
+        scheduler = None
+        log_print("학습률 스케줄러 비활성화 - 고정 학습률 사용")
+    elif scheduler_config['type'] == 'reduce_on_plateau':
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
@@ -520,6 +524,7 @@ def main():
             factor=scheduler_config['factor'],
             min_lr=min_lr
         )
+        log_print(f"ReduceLROnPlateau 스케줄러 설정: patience={scheduler_config['patience']}, factor={scheduler_config['factor']}, min_lr={min_lr}")
     elif scheduler_config['type'] == 'step':
         scheduler = optim.lr_scheduler.StepLR(
             optimizer,
@@ -533,9 +538,10 @@ def main():
             T_max=config['training']['epochs'],
             eta_min=min_lr
         )
+        log_print(f"CosineAnnealingLR 스케줄러 설정: T_max={config['training']['epochs']}, eta_min={min_lr}")
     else:
         scheduler = None
-        log_print("학습률 스케줄러 비활성화")
+        log_print(f"알 수 없는 스케줄러 타입: {scheduler_config['type']} - 스케줄러 비활성화")
 
     # 학습 설정
     epochs = config['training']['epochs']
@@ -597,8 +603,8 @@ def main():
         # 검증
         val_loss, val_errors, all_val_errors = validate(model, val_loader, device)
 
-        # 스케줄러 업데이트
-        if scheduler:
+        # 스케줄러 업데이트 (스케줄러가 활성화되어 있을 때만)
+        if scheduler is not None:
             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(val_loss)
             else:
@@ -746,7 +752,8 @@ def main():
                 save_dir=str(checkpoint_dir),
                 model_name=save_file_name,
                 is_best=True,
-                device=device
+                device=device,
+                log_func=log_print
             )
 
             # 추가 정보를 체크포인트에 저장
@@ -811,7 +818,8 @@ def main():
                     save_dir=str(checkpoint_dir),
                     model_name=save_file_name,
                     is_best=False,
-                    epoch=epoch
+                    epoch=epoch,
+                    log_func=log_print
                 )
                 log_print(f"체크포인트 저장: {checkpoint_path}")
 

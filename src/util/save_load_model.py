@@ -4,12 +4,14 @@
 """
 
 import torch
+import torch.nn as nn
 import torch.onnx
 from pathlib import Path
 import warnings
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Callable
 import glob
 import re
+import traceback
 
 
 def save_model(
@@ -19,7 +21,8 @@ def save_model(
     model_name: str,
     is_best: bool,
     epoch: Optional[int] = None,
-    device: Optional[torch.device] = None
+    device: Optional[torch.device] = None,
+    log_func: Optional[Callable[[str], None]] = None
 ) -> Path:
     """
     PyTorch 모델과 옵티마이저 상태를 저장
@@ -32,6 +35,7 @@ def save_model(
         is_best: best 모델인지 여부
         epoch: 에폭 번호 (일반 모델일 때 필수)
         device: 디바이스 (ONNX 변환용, best일 때만 사용)
+        log_func: 로깅 함수 (선택사항)
 
     Returns:
         Path: 저장된 체크포인트 경로
@@ -39,6 +43,9 @@ def save_model(
     Raises:
         ValueError: is_best=False일 때 epoch가 None인 경우
     """
+    # 로깅 함수가 없으면 print 사용
+    if log_func is None:
+        log_func = print
     # 저장 디렉토리 생성
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -67,14 +74,14 @@ def save_model(
 
     # 체크포인트 저장
     torch.save(checkpoint_data, str(checkpoint_path))
-    print(f"모델 저장: {checkpoint_path}")
+    log_func(f"모델 저장: {checkpoint_path}")
 
     # Best 모델인 경우 ONNX도 저장
     if is_best and device is not None:
-        onnx_path = save_model_as_onnx(model, checkpoint_path, device)
+        onnx_path = save_model_as_onnx(model, checkpoint_path, device, log_func)
         if onnx_path and onnx_path.exists():
             onnx_size_mb = onnx_path.stat().st_size / (1024 * 1024)
-            print(f"ONNX 모델 저장: {onnx_path.name} ({onnx_size_mb:.2f}MB)")
+            log_func(f"ONNX 모델 저장: {onnx_path.name} ({onnx_size_mb:.2f}MB)")
 
     return checkpoint_path
 
@@ -82,7 +89,8 @@ def save_model(
 def save_model_as_onnx(
     model: torch.nn.Module,
     checkpoint_path: Path,
-    device: torch.device
+    device: torch.device,
+    log_func: Optional[Callable[[str], None]] = None
 ) -> Optional[Path]:
     """
     PyTorch 모델을 ONNX 형식으로 변환 및 저장
@@ -91,10 +99,14 @@ def save_model_as_onnx(
         model: PyTorch 모델
         checkpoint_path: 원본 .pth 경로
         device: 현재 디바이스
+        log_func: 로깅 함수 (선택사항)
 
     Returns:
         Path: ONNX 파일 경로 (실패 시 None)
     """
+    # 로깅 함수가 없으면 print 사용
+    if log_func is None:
+        log_func = print
     try:
         # ONNX 파일 경로 생성 (.pth -> .onnx)
         onnx_path = Path(str(checkpoint_path).replace('.pth', '.onnx'))
@@ -110,30 +122,56 @@ def save_model_as_onnx(
             input_dim = model.layers[0].in_features
             dummy_input = torch.randn(1, input_dim)
             input_names = ['features']
-            print(f"ONNX 변환: MLP 모델 감지, 입력 차원={input_dim}")
+            log_func(f"ONNX 변환: MLP 모델 감지, 입력 차원={input_dim}")
         elif hasattr(model, 'input_dim'):
             # input_dim 속성이 있는 경우
             input_dim = model.input_dim
             dummy_input = torch.randn(1, input_dim)
             input_names = ['features']
-            print(f"ONNX 변환: 특징 기반 모델 감지, 입력 차원={input_dim}")
+            log_func(f"ONNX 변환: 특징 기반 모델 감지, 입력 차원={input_dim}")
         elif hasattr(model, 'feature_extractor'):
             # Kornia 모델 등 이미지 입력 모델
             dummy_input = torch.randn(1, 3, 112, 112)
             input_names = ['image']
-            print(f"ONNX 변환: 이미지 입력 모델 감지, shape={dummy_input.shape}")
+            log_func(f"ONNX 변환: 이미지 입력 모델 감지, shape={dummy_input.shape}")
         else:
             # 기본값 (이미지 입력) - 호환성 유지
             dummy_input = torch.randn(1, 3, 112, 112)
             input_names = ['image']
-            print(f"ONNX 변환: 기본 이미지 입력 사용, shape={dummy_input.shape}")
+            log_func(f"ONNX 변환: 기본 이미지 입력 사용, shape={dummy_input.shape}")
+
+        # 모델 출력 형태 확인을 위한 테스트 실행
+        with torch.no_grad():
+            test_output = model(dummy_input)
+
+            # 출력이 딕셔너리인 경우 처리
+            if isinstance(test_output, dict):
+                log_func("ONNX 변환: 딕셔너리 출력 모델 감지")
+                # 'coordinates' 키가 있으면 그것만 반환하는 래퍼 생성
+                if 'coordinates' in test_output:
+                    class ONNXWrapper(nn.Module):
+                        def __init__(self, model):
+                            super().__init__()
+                            self.model = model
+
+                        def forward(self, x):
+                            output_dict = self.model(x)
+                            return output_dict['coordinates']
+
+                    export_model = ONNXWrapper(model)
+                    log_func("ONNX 변환: coordinates 출력만 추출하는 래퍼 사용")
+                else:
+                    log_func("ONNX 변환 경고: 'coordinates' 키를 찾을 수 없음")
+                    export_model = model
+            else:
+                export_model = model
 
         # ONNX로 변환
         with torch.no_grad():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 torch.onnx.export(
-                    model,
+                    export_model,
                     dummy_input,
                     str(onnx_path),
                     export_params=True,
@@ -156,7 +194,11 @@ def save_model_as_onnx(
         return onnx_path
 
     except Exception as e:
-        print(f"ONNX 변환 실패: {e}")
+        log_func(f"ONNX 변환 실패: {e}")
+        log_func(f"에러 타입: {type(e).__name__}")
+        log_func("상세 스택 트레이스:")
+        for line in traceback.format_exc().splitlines():
+            log_func(line)
         # 에러 발생 시에도 모델을 원래 디바이스로 복원
         if 'original_device' in locals():
             model = model.to(original_device)
