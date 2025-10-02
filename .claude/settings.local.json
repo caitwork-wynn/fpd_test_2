@@ -26,7 +26,8 @@
       "Bash(grep:*)",
       "Bash(timeout:*)",
       "Bash(move:*)",
-      "Bash(rename:*)"
+      "Bash(rename:*)",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "ask": []
