@@ -1,10 +1,10 @@
-# 16x16 Autoencoder 설정 파일
+# 16x16 Minimal Autoencoder 설정 파일
 
 model:
   name: "ae_16x16_min"  # 모델 이름 (저장 파일명에 사용)
   input_channels: 1  # 그레이스케일
   output_channels: 1
-  latent_dim: 16  # Latent vector 차원 (7x7의 8차원에서 16차원으로 증가)
+  latent_dim: 32  # Latent vector 차원 (최소 모델용)
 
 data:
   source_folder: "../data/base/not-labeled"  # 원본 이미지 폴더

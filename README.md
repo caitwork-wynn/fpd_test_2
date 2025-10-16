@@ -2,6 +2,14 @@
 
 PyTorch 기반의 이미지 다중 포인트 검출 딥러닝 학습 시스템입니다.
 
+## Git 저장소
+
+```bash
+# 프로젝트 클론
+git clone https://github.com/caitwork-wynn/fpd_test_2.git
+cd fpd_test_2
+```
+
 ## 시스템 개요
 
 이 프로젝트는 이미지에서 다중 포인트(center, floor, front, side)를 검출하는 AI 모델을 학습하기 위한 범용 학습 시스템입니다.
@@ -22,35 +30,74 @@ PyTorch 기반의 이미지 다중 포인트 검출 딥러닝 학습 시스템�
 ```
 fpd_only_model/
 ├── src/
-│   ├── 200.learning.py              # 메인 학습 스크립트
-│   ├── config.yml                   # 학습 설정 파일
-│   ├── model_defs/                  # 모델 정의 모듈
-│   │   ├── floor_model_attention.py # Floor 전용 Attention 모델
-│   │   └── autoencoder_*.py         # Autoencoder 모델들
-│   └── util/                        # 유틸리티 모듈
-│       ├── dual_logger.py           # 로깅 유틸
-│       ├── save_load_model.py       # 모델 저장/로드
-│       ├── error_analysis.py        # 오차 분석
-│       └── data_augmentation.py     # 데이터 증강
+│   ├── 200.learning.py                        # 메인 학습 스크립트
+│   ├── 299.inference_pretrained_model.py      # 학습된 모델 추론 스크립트
+│   ├── config.yml                             # 학습 설정 파일
+│   │
+│   ├── model_defs/                            # 모델 정의 모듈
+│   │   ├── floor_model_attention.py           # Floor 전용 Attention 모델
+│   │   ├── multi_point_model_attention.py     # 다중 포인트 Attention 모델
+│   │   ├── multi_point_model_ae.py            # Autoencoder 기반 모델
+│   │   ├── multi_point_model_kornia.py        # Kornia 기반 모델
+│   │   ├── multi_point_model_pytorch.py       # PyTorch 기본 모델
+│   │   ├── fpd_feature_extractor.py           # FPD 특징 추출기
+│   │   ├── fpd_coordinate_regression.py       # FPD 좌표 회귀 모델
+│   │   ├── fpd_mix_ae_position_embedding.py   # FPD + AE + Position Embedding
+│   │   ├── autoencoder_7x7.py                 # 7x7 Autoencoder
+│   │   └── autoencoder_16x16.py               # 16x16 Autoencoder
+│   │
+│   ├── util/                                  # 유틸리티 모듈
+│   │   ├── dual_logger.py                     # 로깅 유틸
+│   │   ├── save_load_model.py                 # 모델 저장/로드
+│   │   ├── error_analysis.py                  # 오차 분석
+│   │   └── data_augmentation.py               # 데이터 증강
+│   │
+│   ├── 100.merge_learning_data.py             # 학습 데이터 병합
+│   ├── 110.merge_learning_lc_data.py          # LC 데이터 병합
+│   ├── 120.merge_learning_db_data.py          # DB 데이터 병합
+│   ├── 180.check_labels.py                    # 레이블 검증
+│   ├── 190.view_labeling_data.py              # 레이블 데이터 시각화
+│   ├── 199.verify_learning_data_floor.py      # Floor 데이터 검증
+│   ├── 700.make_7x7_autoencoder.py            # 7x7 Autoencoder 생성
+│   ├── 710.make_16x16_autoencoder.py          # 16x16 Autoencoder 생성
+│   ├── 901.test_fpd_feature_extractor.py      # FPD 특징 추출기 테스트
+│   └── 902.test_fpd_coordinate_regression.py  # FPD 좌표 회귀 테스트
+│
 ├── data/
-│   └── learning/                    # 학습 데이터 폴더
-│       └── labels.txt               # 레이블 파일
-├── model/                           # 저장된 모델 체크포인트
-├── logs/                            # 학습 로그 파일
-└── result/                          # 오차 분석 결과
+│   └── learning/                              # 학습 데이터 폴더
+│       └── labels.txt                         # 레이블 파일
+├── model/                                     # 저장된 모델 체크포인트
+├── logs/                                      # 학습 로그 파일
+├── result/                                    # 오차 분석 결과
+└── requirements.txt                           # Python 패키지 의존성
 ```
 
 ## 설치 및 환경 설정
 
-### 필수 패키지
+### 1. 저장소 클론
+
+```bash
+git clone https://github.com/caitwork-wynn/fpd_test_2.git
+cd fpd_test_2
+```
+
+### 2. 필수 패키지 설치
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### GPU 지원
+주요 패키지:
+- PyTorch >= 2.0.0 (딥러닝 프레임워크)
+- torchvision >= 0.15.0 (컴퓨터 비전 라이브러리)
+- Kornia >= 0.7.0 (미분 가능한 컴퓨터 비전 라이브러리)
+- OpenCV >= 4.8.0 (이미지 처리)
+- PyYAML >= 6.0 (설정 파일 파싱)
+- ONNX >= 1.14.0 (모델 변환, 선택사항)
 
-CUDA가 설치된 환경에서는 자동으로 GPU를 사용합니다.
+### 3. GPU 지원
+
+CUDA가 설치된 환경에서는 자동으로 GPU를 사용합니다. CPU 전용 환경에서도 학습 가능합니다.
 
 ## 빠른 시작
 
@@ -63,6 +110,12 @@ ID,SRC,FILE_NAME,CENTER_X,CENTER_Y,FLOOR_X,FLOOR_Y,FRONT_X,FRONT_Y,SIDE_X,SIDE_Y
 001,source1,image001.jpg,56,112,56,100,45,80,70,90
 002,source2,image002.jpg,60,115,60,105,50,85,75,95
 ...
+```
+
+**데이터 제한 옵션**: `config.yml`에서 `max_train_images` 설정으로 학습 데이터 수를 제한할 수 있습니다.
+```yaml
+data:
+  max_train_images: 200  # 0이면 전체 사용, 200이면 200개만 사용
 ```
 
 ### ⚠️ 중요: 데이터 분할 규칙
@@ -154,7 +207,23 @@ python 200.learning.py
 learning_model:
   source: 'model_defs/floor_model_attention.py'
   target_points: ['floor']  # ['center', 'floor', 'front', 'side']
+
+  # 아키텍처 설정
+  architecture:
+    use_fpd_architecture: true  # FPD 분류 기반 회귀 방식 사용
+    features:
+      image_size: [112, 112]
+      grid_size: 7
+      use_autoencoder: false  # Autoencoder 기반 특성 추출
+      encoder_path: '../model/autoencoder_16x16_best.pth'
 ```
+
+사용 가능한 모델:
+- `floor_model_attention.py`: Floor 전용 Attention 모델
+- `multi_point_model_attention.py`: 다중 포인트 Attention 모델
+- `multi_point_model_ae.py`: Autoencoder 기반 모델
+- `multi_point_model_kornia.py`: Kornia 기반 모델
+- `multi_point_model_pytorch.py`: PyTorch 기본 모델
 
 ### 학습 파라미터
 
@@ -231,6 +300,47 @@ training:
 - `../result/{save_file_name}/error_final.json`: 최종 테스트 오차
 - `../result/{save_file_name}/model_info.json`: 모델 메타정보
 - `../result/{save_file_name}/best_epoch_{N}.json`: Best 모델 정보
+
+## 추가 유틸리티 스크립트
+
+### 데이터 관리
+
+- `100.merge_learning_data.py`: 여러 소스의 학습 데이터를 병합
+- `110.merge_learning_lc_data.py`: LC 데이터를 학습 데이터로 병합
+- `120.merge_learning_db_data.py`: DB 데이터를 학습 데이터로 병합
+- `180.check_labels.py`: 레이블 파일 검증 및 오류 확인
+- `190.view_labeling_data.py`: 레이블 데이터 시각화 도구
+- `199.verify_learning_data_floor.py`: Floor 포인트 데이터 검증
+
+### 모델 테스트 및 생성
+
+- `299.inference_pretrained_model.py`: 학습된 모델로 추론 수행
+- `700.make_7x7_autoencoder.py`: 7x7 그리드 Autoencoder 생성
+- `710.make_16x16_autoencoder.py`: 16x16 그리드 Autoencoder 생성
+- `901.test_fpd_feature_extractor.py`: FPD 특징 추출기 단위 테스트
+- `902.test_fpd_coordinate_regression.py`: FPD 좌표 회귀 모델 단위 테스트
+
+### 사용 예시
+
+```bash
+cd src
+
+# 레이블 파일 검증
+python 180.check_labels.py
+
+# 레이블 데이터 시각화
+python 190.view_labeling_data.py
+
+# 학습된 모델로 추론
+python 299.inference_pretrained_model.py
+```
+
+## 최근 업데이트
+
+- **2024-10-02**: 학습 스크립트 및 설정 파일 정리
+- **2024-10-01**: AI 포인트 검출 학습 시스템 문서화 완료
+- **2024-10-01**: Best 모델 저장 시 상세 정보 파일 생성 기능 추가
+- **2024-09-26**: ONNX 변환 문제 해결 - 딕셔너리 출력 모델 지원 추가
 
 ## 라이선스
 
