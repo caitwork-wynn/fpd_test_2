@@ -25,6 +25,8 @@ from datetime import datetime
 import csv
 import random
 from tqdm import tqdm
+import matplotlib
+matplotlib.use('Agg')  # Qt 오류 방지를 위한 백엔드 설정
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from typing import Dict, List, Tuple, Optional
