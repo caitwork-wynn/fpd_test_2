@@ -27,7 +27,20 @@
       "Bash(timeout:*)",
       "Bash(move:*)",
       "Bash(rename:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(python3:*)",
+      "Bash(conda list:*)",
+      "Bash(ldconfig:*)",
+      "Read(//opt/nvidia/vpi3/**)",
+      "Bash(dpkg:*)",
+      "Bash(apt-cache search:*)",
+      "Bash(sudo apt-get update:*)",
+      "Bash(sudo apt-get install:*)",
+      "Bash(sudo -S apt-get update:*)",
+      "Bash(sudo -S apt-get install:*)",
+      "Bash(echo:*)",
+      "Bash(LD_LIBRARY_PATH=/opt/nvidia/vpi3/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH python3:*)",
+      "Bash(git config:*)"
     ],
     "deny": [],
     "ask": []
