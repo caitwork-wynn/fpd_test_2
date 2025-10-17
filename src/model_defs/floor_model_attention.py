@@ -23,6 +23,7 @@ import sys
 # util 폴더를 path에 추가
 sys.path.append(str(Path(__file__).parent.parent))
 from util.data_augmentation import apply_crop_augmentation
+from util.image_resize import resize_image_with_coordinates
 
 
 # ============================================
@@ -1132,17 +1133,25 @@ class DataSet(Dataset):
                 'side_y': sample['side_y']
             }
 
-            # 1. 원본 이미지 처리 (단순 리사이즈)
-            image_112 = cv2.resize(orig_image, self.image_size)
+            # 1. 원본 이미지 처리 (resize_image_with_coordinates 사용)
+            # 좌표를 리스트 형식으로 변환
+            labels = [
+                [coords_orig['center_x'], coords_orig['center_y']],
+                [coords_orig['floor_x'], coords_orig['floor_y']],
+                [coords_orig['front_x'], coords_orig['front_y']],
+                [coords_orig['side_x'], coords_orig['side_y']]
+            ]
 
-            # 원본 이미지 크기에서 112x112로 좌표 변환
-            scale_x = self.image_size[0] / orig_w
-            scale_y = self.image_size[1] / orig_h
+            # resize_image_with_coordinates 함수 사용
+            image_112, adjusted_labels = resize_image_with_coordinates(
+                self.image_size[0], orig_image, labels
+            )
 
+            # 조정된 좌표를 딕셔너리로 변환
             coords_112 = {}
-            for key in ['center', 'floor', 'front', 'side']:
-                coords_112[f'{key}_x'] = coords_orig[f'{key}_x'] * scale_x
-                coords_112[f'{key}_y'] = coords_orig[f'{key}_y'] * scale_y
+            for i, key in enumerate(['center', 'floor', 'front', 'side']):
+                coords_112[f'{key}_x'] = adjusted_labels[i][0]
+                coords_112[f'{key}_y'] = adjusted_labels[i][1]
 
             # 특징 추출
             features = self.detector.detector.extract_features(image_112)
@@ -1234,17 +1243,25 @@ class DataSet(Dataset):
                 'side_y': sample['side_y']
             }
 
-            # 1. 원본 이미지 처리 (단순 리사이즈)
-            image_112 = cv2.resize(orig_image, self.image_size)
+            # 1. 원본 이미지 처리 (resize_image_with_coordinates 사용)
+            # 좌표를 리스트 형식으로 변환
+            labels = [
+                [coords_orig['center_x'], coords_orig['center_y']],
+                [coords_orig['floor_x'], coords_orig['floor_y']],
+                [coords_orig['front_x'], coords_orig['front_y']],
+                [coords_orig['side_x'], coords_orig['side_y']]
+            ]
 
-            # 원본 이미지 크기에서 112x112로 좌표 변환
-            scale_x = self.image_size[0] / orig_w
-            scale_y = self.image_size[1] / orig_h
+            # resize_image_with_coordinates 함수 사용
+            image_112, adjusted_labels = resize_image_with_coordinates(
+                self.image_size[0], orig_image, labels
+            )
 
+            # 조정된 좌표를 딕셔너리로 변환
             coords_112 = {}
-            for key in ['center', 'floor', 'front', 'side']:
-                coords_112[f'{key}_x'] = coords_orig[f'{key}_x'] * scale_x
-                coords_112[f'{key}_y'] = coords_orig[f'{key}_y'] * scale_y
+            for i, key in enumerate(['center', 'floor', 'front', 'side']):
+                coords_112[f'{key}_x'] = adjusted_labels[i][0]
+                coords_112[f'{key}_y'] = adjusted_labels[i][1]
 
             # 좌표 정규화 (min-max 방식) - target_points만 사용
             targets = []

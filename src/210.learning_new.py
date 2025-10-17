@@ -305,7 +305,7 @@ def main():
     # 데이터셋 생성
     log_print("\n데이터셋 생성 중...")
 
-    # config 형식 맞추기 (learning_model 섹션이 없는 경우를 위해)
+    # config 형식 맞추기 (DataSet 클래스가 필요로 하는 구조 생성)
     dataset_config = config.copy()
     if 'data_split' not in dataset_config:
         dataset_config['data_split'] = {
@@ -313,6 +313,13 @@ def main():
             'validation_ratio': config['data']['validation_ratio'],
             'random_seed': config['data'].get('random_seed', 42)
         }
+
+    # learning_model 섹션 추가/업데이트 (DataSet이 image_size에 접근할 수 있도록)
+    if 'learning_model' not in dataset_config:
+        dataset_config['learning_model'] = {}
+    if 'architecture' not in dataset_config['learning_model']:
+        dataset_config['learning_model']['architecture'] = {}
+    dataset_config['learning_model']['architecture']['features'] = features_config
 
     # max_train_images 설정 읽기
     max_train_images = config['data'].get('max_train_images', 0)

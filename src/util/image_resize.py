@@ -12,14 +12,14 @@ from typing import List, Union, Tuple
 
 
 def resize_image_with_coordinates(target_size: int,
-                                image_path: str,
+                                image_path: Union[str, np.ndarray],
                                 labels: List[Union[int, List[int]]]) -> Tuple[np.ndarray, List]:
     """
     이미지를 target_size x target_size로 리사이징하고 좌표를 조정하는 함수
 
     Args:
         target_size: 목표 크기 (64면 64x64, 112면 112x112)
-        image_path: 원본 이미지 파일 경로
+        image_path: 원본 이미지 파일 경로 또는 numpy array
         labels: 좌표 데이터 ([floor] 또는 [center, floor, front, side] 좌표 배열)
 
     Returns:
@@ -33,15 +33,23 @@ def resize_image_with_coordinates(target_size: int,
         >>> labels = [[50, 60], [100, 150], [80, 90], [120, 110]]
         >>> img, coords = resize_image_with_coordinates(112, "image.png", labels)
         >>>
+        >>> # numpy array로 직접 전달
+        >>> img, coords = resize_image_with_coordinates(112, orig_image, labels)
+        >>>
         >>> # 단일 값 포함 케이스
         >>> labels = [5, [100, 150]]  # floor ID와 좌표
         >>> img, coords = resize_image_with_coordinates(64, "image.png", labels)
     """
 
-    # 1. 원본 이미지 읽기
-    original_img = cv2.imread(image_path)
-    if original_img is None:
-        raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
+    # 1. 원본 이미지 읽기 (문자열이면 파일에서 읽고, numpy array면 그대로 사용)
+    if isinstance(image_path, str):
+        original_img = cv2.imread(image_path)
+        if original_img is None:
+            raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
+    elif isinstance(image_path, np.ndarray):
+        original_img = image_path
+    else:
+        raise ValueError(f"image_path는 str 또는 np.ndarray여야 합니다")
 
     original_height, original_width = original_img.shape[:2]
 
