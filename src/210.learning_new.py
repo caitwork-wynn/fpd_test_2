@@ -464,9 +464,22 @@ def main():
 
     # 학습 데이터셋의 모든 타겟 좌표 수집
     all_targets = []
-    for i in range(len(train_dataset.targets)):
-        all_targets.append(train_dataset.targets[i].numpy())
-    all_targets = np.array(all_targets)  # [N, num_coords]
+    # targets 속성이 있는지 확인 (특징 사전 추출 모드)
+    if hasattr(train_dataset, 'targets') and train_dataset.targets is not None:
+        for i in range(len(train_dataset.targets)):
+            target = train_dataset.targets[i].numpy()
+            if target.ndim == 1:
+                all_targets.append(target)
+            else:
+                all_targets.append(target.flatten())
+        all_targets = np.array(all_targets)  # [N, num_coords]
+    else:
+        # On-the-fly 처리 모드: DataLoader를 통해 타겟 수집
+        for batch in train_loader:
+            batch_targets = batch['targets'].numpy()  # [B, num_coords]
+            for i in range(len(batch_targets)):
+                all_targets.append(batch_targets[i])
+        all_targets = np.array(all_targets) if len(all_targets) > 0 else np.array([])  # [N, num_coords]
 
     # 각 좌표별 통계 계산 (정규화된 값)
     coord_stats_normalized = {}

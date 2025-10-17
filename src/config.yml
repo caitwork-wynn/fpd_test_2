@@ -28,12 +28,12 @@ data:
   test_id_suffix: '1'
   validation_ratio: 0.2
   random_seed: 42
-  max_train_images: 200  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
+  max_train_images: 0  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
 
 # 학습 설정
 training:
   batch_size: 512
-  epochs: 20000 # 100000000
+  epochs: 2000000 # 100000000
   learning_rate: 0.001
   weight_decay: 0.01
   optimizer: 'adamw'  # adam, adamw, sgd
