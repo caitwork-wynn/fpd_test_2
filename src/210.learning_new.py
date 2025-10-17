@@ -679,6 +679,7 @@ def main():
     patience_counter = 0
     training_log = []
     training_start_time = time.time()
+    training_start_datetime = datetime.now()  # 사람이 읽을 수 있는 형식으로 시작 시간 저장
     epoch = start_epoch  # epoch 변수 초기화 (학습 루프를 돌지 않은 경우 대비)
 
     # 시간 기반 LR 감소 설정
@@ -1015,6 +1016,8 @@ def main():
 
     # 최종 결과 텍스트 파일 저장 (result/result_모델명.txt)
     final_txt_path = results_base_dir / f"result_{save_file_name}.txt"
+    training_end_datetime = datetime.now()  # 학습 종료 시간
+
     with open(final_txt_path, 'w', encoding='utf-8') as f:
         # 학습 데이터 레이블 좌표 통계 추가
         f.write("=" * 60 + "\n")
@@ -1038,7 +1041,16 @@ def main():
         for line in output_lines:
             f.write(line + "\n")
         f.write(f"\n최종 테스트 손실: {test_loss:.6f}\n")
-        f.write(f"최종 평균 오차: {final_avg_error:.2f} pixels\n")
+        f.write(f"최종 평균 오차: {final_avg_error:.2f} pixels\n\n")
+
+        # 학습 시간 정보 추가
+        f.write("=" * 60 + "\n")
+        f.write("학습 시간 정보\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"학습 시작 시간: {training_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"학습 종료 시간: {training_end_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"총 학습 시간: {total_hours:02d}:{total_minutes:02d}:{total_seconds:02d}\n")
+        f.write("=" * 60 + "\n")
     log_print(f"최종 결과 텍스트 저장: {final_txt_path}")
 
     # 모델 정보 JSON 저장
