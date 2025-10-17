@@ -1,25 +1,25 @@
 learning_model:
   source: 'model_defs/floor_model_attention.py'  # floor 전용 모델로 변경
   # 타겟 포인트 설정 (floor만 학습)
-  target_points: ['floor']  # ['center', 'floor', 'front', 'side'] 중 선택 가능
+  # target_points: ['floor']  # ['center', 'floor', 'front', 'side'] 중 선택 가능 - floor_model_attention.py의 TARGET_POINTS 사용
   # 아키텍처 설정
   architecture:
     # FPD 아키텍처 사용 여부 (true: FPD 분류 기반 회귀, false: 기존 MLP)
-    use_fpd_architecture: true
+    # use_fpd_architecture: true  # floor_model_attention.py의 USE_FPD_ARCHITECTURE 사용
     # 특징 추출 설정
     features:
-      image_size: [112, 112]
-      grid_size: 7
+      # image_size: [112, 112]  # floor_model_attention.py의 IMAGE_SIZE 사용
+      # grid_size: 7  # floor_model_attention.py의 GRID_SIZE 사용
       # Autoencoder 기반 특성 추출 설정
-      use_autoencoder: false
-      encoder_path: '../model/autoencoder_16x16_best.pth'
-      encoder_latent_dim: 16
+      # use_autoencoder: false  # floor_model_attention.py의 USE_AUTOENCODER 사용
+      # encoder_path: '../model/autoencoder_16x16_best.pth'  # floor_model_attention.py의 ENCODER_PATH 사용
+      # encoder_latent_dim: 16  # floor_model_attention.py의 ENCODER_LATENT_DIM 사용
   # 모델 저장 설정
   checkpointing:
     save_dir: '../model'
     save_best_only: false
     save_frequency: 1000            # 에폭 단위
-    save_file_name: 'floor_attention'  # Floor only attention model
+    # save_file_name: 'floor_attention'  # Floor only attention model - floor_model_attention.py의 SAVE_FILE_NAME 사용
     
 # 데이터
 data:

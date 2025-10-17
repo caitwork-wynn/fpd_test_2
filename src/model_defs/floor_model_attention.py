@@ -25,6 +25,35 @@ sys.path.append(str(Path(__file__).parent.parent))
 from util.data_augmentation import apply_crop_augmentation
 
 
+# ============================================
+# 모델 설정 상수 (config.yml에서 이동)
+# ============================================
+TARGET_POINTS = ['floor']
+USE_FPD_ARCHITECTURE = True
+IMAGE_SIZE = [112, 112]
+GRID_SIZE = 7
+USE_AUTOENCODER = False
+ENCODER_PATH = '../model/autoencoder_16x16_best.pth'
+ENCODER_LATENT_DIM = 16
+SAVE_FILE_NAME = 'floor_attention'
+
+
+def get_model_config():
+    """모델 설정 반환 (200.learning.py 호환)"""
+    return {
+        'target_points': TARGET_POINTS,
+        'use_fpd_architecture': USE_FPD_ARCHITECTURE,
+        'save_file_name': SAVE_FILE_NAME,
+        'features': {
+            'image_size': IMAGE_SIZE,
+            'grid_size': GRID_SIZE,
+            'use_autoencoder': USE_AUTOENCODER,
+            'encoder_path': ENCODER_PATH,
+            'encoder_latent_dim': ENCODER_LATENT_DIM
+        }
+    }
+
+
 class PositionalEncoding(nn.Module):
     """7x7 그리드에 대한 위치 인코딩"""
 

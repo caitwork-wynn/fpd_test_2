@@ -190,9 +190,6 @@ def main():
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
-    # 설정 정보 읽기
-    save_file_name = config['learning_model']['checkpointing']['save_file_name']
-
     # 동적 모델 import
     model_source = config['learning_model']['source']
     model_path = (Path(__file__).parent / model_source).resolve()
@@ -211,6 +208,27 @@ def main():
     PointDetectorDataSetWithAutoencoder = getattr(model_module, 'PointDetectorDataSetWithAutoencoder', None)
 
     print("모델 클래스 로드 완료")
+
+    # 모델 설정 가져오기 (get_model_config 함수가 있는 경우)
+    if hasattr(model_module, 'get_model_config'):
+        model_config = model_module.get_model_config()
+        save_file_name = model_config['save_file_name']
+        target_points = model_config['target_points']
+        use_fpd_architecture = model_config['use_fpd_architecture']
+        features_config = model_config['features']
+        print(f"모델 설정 로드: {save_file_name}")
+        print(f"타겟 포인트: {target_points}")
+        print(f"FPD 아키텍처: {use_fpd_architecture}")
+    else:
+        # get_model_config가 없는 경우 config.yml에서 읽기 (하위 호환성)
+        save_file_name = config.get('learning_model', {}).get('checkpointing', {}).get('save_file_name', 'model')
+        target_points = config.get('learning_model', {}).get('target_points', None)
+        use_fpd_architecture = config.get('learning_model', {}).get('architecture', {}).get('use_fpd_architecture', False)
+        features_config = config.get('learning_model', {}).get('architecture', {}).get('features', {
+            'image_size': [112, 112],
+            'grid_size': 7
+        })
+        print(f"모델 설정 로드 (config.yml): {save_file_name}")
 
     # 경로 설정
     base_dir = Path(__file__).parent
@@ -265,15 +283,16 @@ def main():
     log_print("\n모델 초기화...")
     # learning_model 섹션과 features 섹션을 합쳐서 전달
     detector_config = config['learning_model'].copy()
-    detector_config['features'] = config['learning_model']['architecture']['features']
+    detector_config['features'] = features_config  # 모듈에서 가져온 설정 사용
     detector_config['training'] = config['training']
+    detector_config['target_points'] = target_points  # 모듈에서 가져온 타겟 포인트
+    detector_config['use_fpd_architecture'] = use_fpd_architecture  # 모듈에서 가져온 아키텍처 설정
     detector = PointDetector(detector_config, device)
     model = detector.model
 
     # 모델 아키텍처 정보 출력
     log_print("\n=== 모델 아키텍처 ===")
     log_print(f"모델 소스: {model_source}")
-    features_config = config['learning_model']['architecture']['features']
     log_print(f"입력: 3x{features_config['image_size'][0]}x{features_config['image_size'][1]} 이미지")
     log_print(f"그리드 크기: {features_config['grid_size']}x{features_config['grid_size']}")
 
@@ -303,17 +322,16 @@ def main():
     if extract_features:
         log_print("특징 사전 추출 모드 활성화 (학습 속도 향상)")
 
-    # 타겟 포인트 설정 읽기
-    target_points = config.get('learning_model', {}).get('target_points', None)
+    # 타겟 포인트 정보 출력 (이미 모듈에서 로드됨)
     if target_points:
         log_print(f"타겟 포인트: {', '.join(target_points)}")
 
-    # Autoencoder 사용 여부 확인
-    use_autoencoder = config['learning_model']['architecture']['features'].get('use_autoencoder', False)
+    # Autoencoder 사용 여부 확인 (모듈 설정에서 가져옴)
+    use_autoencoder = features_config.get('use_autoencoder', False)
 
     if use_autoencoder and PointDetectorDataSetWithAutoencoder is not None:
         log_print("Autoencoder 기반 특성 추출 사용")
-        encoder_path = config['learning_model']['architecture']['features'].get('encoder_path', '../model/autoencoder_16x16_best.pth')
+        encoder_path = features_config.get('encoder_path', '../model/autoencoder_16x16_best.pth')
 
         # DataSetWithAutoencoder 사용
         train_dataset = PointDetectorDataSetWithAutoencoder(
