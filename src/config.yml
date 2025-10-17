@@ -1,5 +1,5 @@
 learning_model:
-  source: 'model_defs/floor_model_attention.py'  # floor 전용 모델로 변경
+  source: 'model_defs/mpm_cross_self_attention_vpi.py'  # floor 전용 모델로 변경
   # 타겟 포인트 설정 (floor만 학습)
   # target_points: ['floor']  # ['center', 'floor', 'front', 'side'] 중 선택 가능 - floor_model_attention.py의 TARGET_POINTS 사용
   # 아키텍처 설정
@@ -30,11 +30,10 @@ data:
   random_seed: 42
   max_train_images: 200  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
 
-
 # 학습 설정
 training:
   batch_size: 512
-  epochs: 100000000
+  epochs: 20000 # 100000000
   learning_rate: 0.001
   weight_decay: 0.01
   optimizer: 'adamw'  # adam, adamw, sgd
@@ -74,7 +73,7 @@ training:
 
     # 시간 기반 LR 감소 (모든 스케줄러와 병행 사용 가능)
     time_based:
-      enabled: true              # 시간 기반 감소 활성화
+      enabled: false             # 시간 기반 감소 비활성화
       patience_hours: 0.3        # Best 모델 갱신 없이 대기할 시간 (시간)
       factor: 0.7               # 감소 비율 (새 LR = 기존 LR * factor)
 

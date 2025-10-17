@@ -48,25 +48,35 @@ def display_error_analysis(
     # 포인트 이름 매핑 준비
     if point_names is None:
         # 기본 이름 사용 (키를 대문자로)
-        point_names = {key: key.upper() for key in errors.keys()}
+        point_names = {}
+        for key in errors.keys():
+            # 튜플인 경우 문자열로 변환
+            if isinstance(key, tuple):
+                point_names[key] = str(key).upper()
+            else:
+                point_names[key] = key.upper()
 
     # 각 포인트별 통계 출력
     all_distances = []
 
     for key in errors.keys():
-        if key in errors and errors[key].get('x') and errors[key].get('y'):
+        # get()을 사용하되, None이 아닌지만 확인 (빈 리스트도 처리)
+        if key in errors and errors[key].get('x') is not None and errors[key].get('y') is not None:
             # 통계 계산
             stats = calculate_statistics(errors[key])
 
             # 표시 이름 결정
-            display_name = point_names.get(key, key.upper())
+            if isinstance(key, tuple):
+                display_name = point_names.get(key, str(key).upper())
+            else:
+                display_name = point_names.get(key, key.upper())
 
             # 포맷팅된 라인 생성
             line = format_single_coordinate(display_name, stats)
             output_lines.append(line)
 
             # 전체 거리 오차 수집
-            if 'dist' in errors[key]:
+            if 'dist' in errors[key] and errors[key]['dist']:
                 all_distances.extend(errors[key]['dist'])
 
     # 전체 평균 거리 오차 계산 및 출력
@@ -256,18 +266,20 @@ def save_error_analysis_json(
     # 원본 데이터를 JSON 직렬화 가능한 형태로 변환 (리스트가 너무 길면 통계만 저장)
     for key in errors.keys():
         if key in errors:
+            # 키를 문자열로 변환
+            key_str = str(key) if isinstance(key, tuple) else key
             error_data = errors[key]
             # 데이터가 100개 이하면 원본 저장, 아니면 통계만 저장
-            json_data['errors'][key] = {}
+            json_data['errors'][key_str] = {}
             for axis in ['x', 'y', 'dist']:
                 if axis in error_data and error_data[axis]:
                     data = error_data[axis]
                     if len(data) <= 100:
                         # 원본 데이터 저장
-                        json_data['errors'][key][axis] = [float(v) for v in data]
+                        json_data['errors'][key_str][axis] = [float(v) for v in data]
                     else:
                         # 통계만 저장
-                        json_data['errors'][key][axis] = {
+                        json_data['errors'][key_str][axis] = {
                             'count': len(data),
                             'mean': float(np.mean(data)),
                             'std': float(np.std(data)),
@@ -281,9 +293,11 @@ def save_error_analysis_json(
     # 통계 계산 및 저장
     for key in errors.keys():
         if key in errors:
+            # 키를 문자열로 변환
+            key_str = str(key) if isinstance(key, tuple) else key
             stats = calculate_statistics(errors[key])
             # numpy float를 일반 float로 변환
-            json_data['statistics'][key] = {
+            json_data['statistics'][key_str] = {
                 axis: {
                     'mean': float(stats[axis]['mean']),
                     'std': float(stats[axis]['std'])

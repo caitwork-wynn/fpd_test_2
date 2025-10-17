@@ -82,8 +82,24 @@ def validate(model, dataloader, device):
     # 포인트 이름 자동 감지
     if 'point_names' in sample_output:
         point_names = sample_output['point_names']
+        # 리스트가 아니면 리스트로 변환
+        if not isinstance(point_names, list):
+            point_names = list(point_names) if hasattr(point_names, '__iter__') and not isinstance(point_names, str) else [point_names]
     elif 'point_names' in sample_batch:
-        point_names = sample_batch['point_names']
+        # DataLoader의 default_collate가 배치의 point_names를 zip하기 때문에
+        # [('center', 'center', ...), ('floor', 'floor', ...), ...] 형태가 됨
+        # 각 튜플의 첫 번째 요소만 가져와서 고유한 리스트를 만듦
+        point_names_raw = sample_batch['point_names']
+        if isinstance(point_names_raw, (list, tuple)) and len(point_names_raw) > 0:
+            if isinstance(point_names_raw[0], (tuple, list)):
+                # zip된 형태: [('center', 'center'), ('floor', 'floor'), ...]
+                # 각 튜플의 첫 번째 요소만 가져옴
+                point_names = [item[0] if isinstance(item, (tuple, list)) else item for item in point_names_raw]
+            else:
+                # 이미 단순 리스트: ['center', 'floor', 'front', 'side']
+                point_names = list(point_names_raw)
+        else:
+            point_names = list(point_names_raw) if hasattr(point_names_raw, '__iter__') and not isinstance(point_names_raw, str) else [point_names_raw]
     else:
         # 좌표 개수로부터 추론
         num_coords = sample_output['coordinates'].shape[1]
@@ -93,6 +109,10 @@ def validate(model, dataloader, device):
             point_names = ['center', 'floor', 'front', 'side']
         else:
             point_names = [f'point_{i//2}' for i in range(0, num_coords, 2)]
+
+    # point_names가 리스트인지 확인 및 기본값 설정
+    if not isinstance(point_names, list) or len(point_names) == 0:
+        point_names = ['center', 'floor', 'front', 'side']  # 기본값
 
     all_errors = {}
     for name in point_names:
@@ -794,8 +814,14 @@ def main():
             all_distances = []
 
             for point_name, errors in all_val_errors.items():
+                # point_name이 튜플일 경우 문자열로 변환
+                if isinstance(point_name, tuple):
+                    point_name_str = str(point_name)
+                else:
+                    point_name_str = str(point_name)
+
                 if errors.get('x') and errors.get('y') and errors.get('dist'):
-                    detailed_errors[point_name] = {
+                    detailed_errors[point_name_str] = {
                         'x': {
                             'mean': float(np.mean(errors['x'])),
                             'std': float(np.std(errors['x']))
@@ -820,11 +846,17 @@ def main():
                 }
 
             with open(best_info_path, 'w', encoding='utf-8') as f:
+                # val_errors 키를 문자열로 변환
+                val_errors_simple = {}
+                for k, v in val_errors.items():
+                    key_str = str(k) if isinstance(k, tuple) else k
+                    val_errors_simple[key_str] = float(v)
+
                 json.dump({
                     'epoch': epoch,
                     'val_loss': float(val_loss),
                     'val_errors': detailed_errors,
-                    'val_errors_simple': {k: float(v) for k, v in val_errors.items()},  # 기존 형식 호환성
+                    'val_errors_simple': val_errors_simple,  # 기존 형식 호환성
                     'overall_error': overall_error,
                     'timestamp': datetime.now().isoformat()
                 }, f, indent=2, ensure_ascii=False)
@@ -924,6 +956,16 @@ def main():
             'model_path': str(checkpoint_dir / f"{save_file_name}_best.pth")
         }
     )
+
+    # 최종 결과 텍스트 파일 저장 (result/result_모델명.txt)
+    final_txt_path = results_base_dir / f"result_{save_file_name}.txt"
+    with open(final_txt_path, 'w', encoding='utf-8') as f:
+        f.write("=== 테스트 데이터 최종 평가 ===\n\n")
+        for line in output_lines:
+            f.write(line + "\n")
+        f.write(f"\n최종 테스트 손실: {test_loss:.6f}\n")
+        f.write(f"최종 평균 오차: {final_avg_error:.2f} pixels\n")
+    log_print(f"최종 결과 텍스트 저장: {final_txt_path}")
 
     # 모델 정보 JSON 저장
     model_info['best_epoch'] = best_epoch

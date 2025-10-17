@@ -117,7 +117,13 @@ def save_model_as_onnx(
         model.eval()
 
         # 모델로부터 입력 차원 동적으로 구하기
-        if hasattr(model, 'layers') and len(model.layers) > 0:
+        if hasattr(model, 'MODEL_NAME') and model.MODEL_NAME == "mpm_cross_self_attention_vpi":
+            # MPM 모델: 234차원 특징 입력 (gray_latent 32 + canny_latent 32 + ORB 170)
+            input_dim = 234
+            dummy_input = torch.randn(1, input_dim)
+            input_names = ['features']
+            log_func(f"ONNX 변환: MPM 모델 감지, 입력 차원={input_dim}")
+        elif hasattr(model, 'layers') and len(model.layers) > 0:
             # ConfigurableMLPModel의 경우 (PyTorch 모델)
             input_dim = model.layers[0].in_features
             dummy_input = torch.randn(1, input_dim)
@@ -149,17 +155,44 @@ def save_model_as_onnx(
                 log_func("ONNX 변환: 딕셔너리 출력 모델 감지")
                 # 'coordinates' 키가 있으면 그것만 반환하는 래퍼 생성
                 if 'coordinates' in test_output:
-                    class ONNXWrapper(nn.Module):
-                        def __init__(self, model):
-                            super().__init__()
-                            self.model = model
+                    # MPM 모델인 경우 전용 래퍼 사용
+                    if hasattr(model, 'MODEL_NAME') and model.MODEL_NAME == "mpm_cross_self_attention_vpi":
+                        try:
+                            # MPMAttentionModelONNX import
+                            import importlib.util
+                            spec = importlib.util.spec_from_file_location(
+                                "mpm_model",
+                                Path(__file__).parent.parent / "model_defs" / "mpm_cross_self_attention_vpi.py"
+                            )
+                            mpm_module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mpm_module)
+                            MPMAttentionModelONNX = mpm_module.MPMAttentionModelONNX
+                            export_model = MPMAttentionModelONNX(model)
+                            log_func("ONNX 변환: MPMAttentionModelONNX 래퍼 사용")
+                        except Exception as e:
+                            log_func(f"ONNX 변환 경고: MPM 래퍼 로드 실패 ({e}), 기본 래퍼 사용")
+                            class ONNXWrapper(nn.Module):
+                                def __init__(self, model):
+                                    super().__init__()
+                                    self.model = model
 
-                        def forward(self, x):
-                            output_dict = self.model(x)
-                            return output_dict['coordinates']
+                                def forward(self, x):
+                                    output_dict = self.model(x)
+                                    return output_dict['coordinates']
 
-                    export_model = ONNXWrapper(model)
-                    log_func("ONNX 변환: coordinates 출력만 추출하는 래퍼 사용")
+                            export_model = ONNXWrapper(model)
+                    else:
+                        class ONNXWrapper(nn.Module):
+                            def __init__(self, model):
+                                super().__init__()
+                                self.model = model
+
+                            def forward(self, x):
+                                output_dict = self.model(x)
+                                return output_dict['coordinates']
+
+                        export_model = ONNXWrapper(model)
+                        log_func("ONNX 변환: coordinates 출력만 추출하는 래퍼 사용")
                 else:
                     log_func("ONNX 변환 경고: 'coordinates' 키를 찾을 수 없음")
                     export_model = model
@@ -175,7 +208,7 @@ def save_model_as_onnx(
                     dummy_input,
                     str(onnx_path),
                     export_params=True,
-                    opset_version=14,
+                    opset_version=18,
                     do_constant_folding=True,
                     input_names=input_names,
                     output_names=['coordinates'],
