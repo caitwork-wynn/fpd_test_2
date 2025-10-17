@@ -118,11 +118,49 @@ def save_model_as_onnx(
 
         # 모델로부터 입력 차원 동적으로 구하기
         if hasattr(model, 'MODEL_NAME') and model.MODEL_NAME == "mpm_cross_self_attention_vpi":
-            # MPM 모델: 234차원 특징 입력 (gray_latent 32 + canny_latent 32 + ORB 170)
-            input_dim = 234
+            # MPM 모델: 모델 객체의 input_dim 속성 우선 사용 (가장 정확)
+            if hasattr(model, 'input_dim'):
+                input_dim = model.input_dim
+                log_func(f"ONNX 변환: MPM 모델 감지, 입력 차원={input_dim} (모델 객체 속성)")
+            else:
+                # fallback: 모델 파일에서 입력 차원 동적으로 가져오기
+                try:
+                    import importlib.util
+                    # 모델 소스 파일 경로 찾기 (여러 패턴 시도)
+                    possible_paths = [
+                        Path(__file__).parent.parent / "model_defs" / "mpm_cross_self_attention_vpi.py",
+                        Path(__file__).parent.parent / "model_defs" / "001.mpm_cross_self_attention_vpi.py",
+                        Path(__file__).parent.parent / "model_defs" / "002.mpm_001_ex_canny.py",
+                    ]
+
+                    input_dim = None
+                    loaded_from = None
+                    for model_path in possible_paths:
+                        if model_path.exists():
+                            try:
+                                spec = importlib.util.spec_from_file_location("mpm_model_temp", str(model_path))
+                                mpm_module = importlib.util.module_from_spec(spec)
+                                spec.loader.exec_module(mpm_module)
+
+                                if hasattr(mpm_module, 'get_input_dim'):
+                                    input_dim = mpm_module.get_input_dim()
+                                    loaded_from = model_path.name
+                                    log_func(f"ONNX 변환: MPM 모델 입력 차원 로드 ({loaded_from}), 입력 차원={input_dim}")
+                                    break
+                            except Exception as e:
+                                # 이 파일에서 로드 실패하면 다음 파일 시도
+                                continue
+
+                    if input_dim is None:
+                        # 최종 fallback
+                        input_dim = 202
+                        log_func(f"ONNX 변환: MPM 모델 감지, 입력 차원={input_dim} (기본값)")
+                except Exception as e:
+                    log_func(f"ONNX 변환 경고: 입력 차원 자동 감지 실패 ({e}), 기본값 202 사용")
+                    input_dim = 202
+
             dummy_input = torch.randn(1, input_dim)
             input_names = ['features']
-            log_func(f"ONNX 변환: MPM 모델 감지, 입력 차원={input_dim}")
         elif hasattr(model, 'layers') and len(model.layers) > 0:
             # ConfigurableMLPModel의 경우 (PyTorch 모델)
             input_dim = model.layers[0].in_features
@@ -158,19 +196,42 @@ def save_model_as_onnx(
                     # MPM 모델인 경우 전용 래퍼 사용
                     if hasattr(model, 'MODEL_NAME') and model.MODEL_NAME == "mpm_cross_self_attention_vpi":
                         try:
-                            # MPMAttentionModelONNX import
+                            # MPMAttentionModelONNX import (여러 파일 시도)
                             import importlib.util
-                            spec = importlib.util.spec_from_file_location(
-                                "mpm_model",
-                                Path(__file__).parent.parent / "model_defs" / "mpm_cross_self_attention_vpi.py"
-                            )
-                            mpm_module = importlib.util.module_from_spec(spec)
-                            spec.loader.exec_module(mpm_module)
-                            MPMAttentionModelONNX = mpm_module.MPMAttentionModelONNX
-                            export_model = MPMAttentionModelONNX(model)
-                            log_func("ONNX 변환: MPMAttentionModelONNX 래퍼 사용")
+
+                            possible_wrapper_paths = [
+                                Path(__file__).parent.parent / "model_defs" / "001.mpm_cross_self_attention_vpi.py",
+                                Path(__file__).parent.parent / "model_defs" / "002.mpm_001_ex_canny.py",
+                                Path(__file__).parent.parent / "model_defs" / "mpm_cross_self_attention_vpi.py",
+                            ]
+
+                            wrapper_loaded = False
+                            for wrapper_path in possible_wrapper_paths:
+                                if wrapper_path.exists():
+                                    try:
+                                        spec = importlib.util.spec_from_file_location(
+                                            "mpm_model_wrapper",
+                                            str(wrapper_path)
+                                        )
+                                        mpm_module = importlib.util.module_from_spec(spec)
+                                        spec.loader.exec_module(mpm_module)
+
+                                        if hasattr(mpm_module, 'MPMAttentionModelONNX'):
+                                            MPMAttentionModelONNX = mpm_module.MPMAttentionModelONNX
+                                            export_model = MPMAttentionModelONNX(model)
+                                            log_func(f"ONNX 변환: MPMAttentionModelONNX 래퍼 사용 ({wrapper_path.name})")
+                                            wrapper_loaded = True
+                                            break
+                                    except Exception:
+                                        # 이 파일에서 로드 실패하면 다음 파일 시도
+                                        continue
+
+                            if not wrapper_loaded:
+                                # 모든 파일에서 래퍼를 찾지 못한 경우 기본 래퍼 사용
+                                raise ImportError("MPMAttentionModelONNX를 찾을 수 없음")
+
                         except Exception as e:
-                            log_func(f"ONNX 변환 경고: MPM 래퍼 로드 실패 ({e}), 기본 래퍼 사용")
+                            # 기본 래퍼 사용 (경고 없이 조용히 처리)
                             class ONNXWrapper(nn.Module):
                                 def __init__(self, model):
                                     super().__init__()
@@ -181,6 +242,7 @@ def save_model_as_onnx(
                                     return output_dict['coordinates']
 
                             export_model = ONNXWrapper(model)
+                            log_func("ONNX 변환: 기본 ONNX 래퍼 사용")
                     else:
                         class ONNXWrapper(nn.Module):
                             def __init__(self, model):

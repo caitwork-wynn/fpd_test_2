@@ -459,6 +459,61 @@ def main():
         num_workers=0
     )
 
+    # 학습 데이터 좌표 통계 계산 및 출력
+    log_print("\n=== 학습 데이터 레이블 좌표 통계 ===")
+
+    # 학습 데이터셋의 모든 타겟 좌표 수집
+    all_targets = []
+    for i in range(len(train_dataset.targets)):
+        all_targets.append(train_dataset.targets[i].numpy())
+    all_targets = np.array(all_targets)  # [N, num_coords]
+
+    # 각 좌표별 통계 계산 (정규화된 값)
+    coord_stats_normalized = {}
+    coord_stats_pixel = {}
+
+    for idx, point_name in enumerate(target_points):
+        x_idx = idx * 2
+        y_idx = idx * 2 + 1
+
+        # 정규화된 좌표의 평균과 표준편차
+        x_norm_mean = np.mean(all_targets[:, x_idx])
+        x_norm_std = np.std(all_targets[:, x_idx])
+        y_norm_mean = np.mean(all_targets[:, y_idx])
+        y_norm_std = np.std(all_targets[:, y_idx])
+
+        coord_stats_normalized[point_name] = {
+            'x_mean': x_norm_mean,
+            'x_std': x_norm_std,
+            'y_mean': y_norm_mean,
+            'y_std': y_norm_std
+        }
+
+        # 픽셀 좌표로 변환
+        x_pixel_vals = all_targets[:, x_idx] * (train_dataset.coord_max_x - train_dataset.coord_min_x) + train_dataset.coord_min_x
+        y_pixel_vals = all_targets[:, y_idx] * (train_dataset.coord_max_y - train_dataset.coord_min_y) + train_dataset.coord_min_y
+
+        x_pixel_mean = np.mean(x_pixel_vals)
+        x_pixel_std = np.std(x_pixel_vals)
+        y_pixel_mean = np.mean(y_pixel_vals)
+        y_pixel_std = np.std(y_pixel_vals)
+
+        coord_stats_pixel[point_name] = {
+            'x_mean': x_pixel_mean,
+            'x_std': x_pixel_std,
+            'y_mean': y_pixel_mean,
+            'y_std': y_pixel_std
+        }
+
+        # 화면 출력
+        log_print(f"\n[{point_name.upper()}]")
+        log_print(f"  픽셀 좌표:")
+        log_print(f"    X: 평균 = {x_pixel_mean:.2f}px, 표준편차 = {x_pixel_std:.2f}px")
+        log_print(f"    Y: 평균 = {y_pixel_mean:.2f}px, 표준편차 = {y_pixel_std:.2f}px")
+
+    log_print(f"\n총 학습 샘플 수: {len(all_targets)}")
+    log_print("=" * 60)
+
     # 옵티마이저 설정
     optimizer_name = config['training']['optimizer'].lower()
     learning_rate = config['training']['learning_rate']
@@ -624,6 +679,7 @@ def main():
     patience_counter = 0
     training_log = []
     training_start_time = time.time()
+    epoch = start_epoch  # epoch 변수 초기화 (학습 루프를 돌지 않은 경우 대비)
 
     # 시간 기반 LR 감소 설정
     time_based_config = config['training']['scheduler'].get('time_based', {})
@@ -960,6 +1016,24 @@ def main():
     # 최종 결과 텍스트 파일 저장 (result/result_모델명.txt)
     final_txt_path = results_base_dir / f"result_{save_file_name}.txt"
     with open(final_txt_path, 'w', encoding='utf-8') as f:
+        # 학습 데이터 레이블 좌표 통계 추가
+        f.write("=" * 60 + "\n")
+        f.write("학습 데이터 레이블 좌표 통계\n")
+        f.write("=" * 60 + "\n\n")
+
+        for point_name in target_points:
+            stats_norm = coord_stats_normalized[point_name]
+            stats_pix = coord_stats_pixel[point_name]
+
+            f.write(f"[{point_name.upper()}]\n")
+            f.write(f"  픽셀 좌표:\n")
+            f.write(f"    X: 평균 = {stats_pix['x_mean']:.2f}px, 표준편차 = {stats_pix['x_std']:.2f}px\n")
+            f.write(f"    Y: 평균 = {stats_pix['y_mean']:.2f}px, 표준편차 = {stats_pix['y_std']:.2f}px\n\n")
+
+        f.write(f"총 학습 샘플 수: {len(all_targets)}\n")
+        f.write("=" * 60 + "\n\n")
+
+        # 테스트 결과
         f.write("=== 테스트 데이터 최종 평가 ===\n\n")
         for line in output_lines:
             f.write(line + "\n")

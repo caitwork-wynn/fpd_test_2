@@ -2,7 +2,7 @@
 """
 MPM Cross-Self Attention VPI 모델 (재설계 버전)
 - 특징 추출과 AI 모델 완전 분리
-- 16x16 Grayscale 인코더 + 16x16 Canny 인코더 + VPI ORB 상위 5개
+- 16x16 Grayscale 인코더 + VPI ORB 상위 5개
 - 순수 PyTorch 모델로 ONNX 변환 가능
 - 210.learning_new.py 호환
 """
@@ -46,12 +46,12 @@ except Exception as e:
 # ============================================
 TARGET_POINTS = ['center', 'floor', 'front', 'side']
 USE_FPD_ARCHITECTURE = True
-IMAGE_SIZE = [64, 64]
+IMAGE_SIZE = [96, 96]
 GRID_SIZE = 7
 USE_AUTOENCODER = True
 ENCODER_PATH = '../model/autoencoder_16x16_best.pth'
 ENCODER_LATENT_DIM = 32
-SAVE_FILE_NAME = f'mpm_cross_self_attention_vpi_{IMAGE_SIZE[0]}'
+SAVE_FILE_NAME = f'mpm_001_ex_canny_{IMAGE_SIZE[0]}'
 
 # VPI/ORB 설정
 VPI_MAX_FEATURES = 5
@@ -75,6 +75,18 @@ def get_model_config():
             'encoder_latent_dim': ENCODER_LATENT_DIM
         }
     }
+
+
+def get_input_dim():
+    """모델의 기대 입력 차원 반환 (ONNX 변환용)
+
+    Returns:
+        int: 입력 특징 벡터 차원
+            - gray_latent: 32
+            - ORB features: 170 (5 keypoints × 34 features)
+            - Total: 202
+    """
+    return 202  # gray(32) + ORB(170)
 
 
 # ============================================
@@ -178,41 +190,14 @@ class ORBDetector:
 # 특징 추출기 (분리된 클래스)
 # ============================================
 
-def apply_canny_edge_detection(image: np.ndarray, low_threshold: int = 50,
-                                high_threshold: int = 150) -> np.ndarray:
-    """
-    Canny edge detection 적용
-
-    Args:
-        image: [H, W] or [H, W, 3] numpy array
-        low_threshold: Canny 하한 임계값
-        high_threshold: Canny 상한 임계값
-
-    Returns:
-        edges: [H, W] binary edge map (0 or 255)
-    """
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-
-    # Canny edge detection
-    edges = cv2.Canny(gray, low_threshold, high_threshold)
-
-    return edges
-
-
 class MPMFeatureExtractor:
-    """16x16 Grayscale 인코더 + 16x16 Canny 인코더 + VPI ORB 특징 추출기"""
+    """16x16 Grayscale 인코더 + VPI ORB 특징 추출기"""
 
     def __init__(self, encoder_path: str, image_size: Tuple[int, int] = (64, 64),
-                 latent_dim: int = 32, device: str = 'cpu',
-                 canny_low: int = 50, canny_high: int = 150):
+                 latent_dim: int = 32, device: str = 'cpu'):
         self.image_size = image_size
         self.latent_dim = latent_dim
         self.device = device
-        self.canny_low = canny_low
-        self.canny_high = canny_high
 
         # ORB 검출기
         self.orb_detector = ORBDetector(
@@ -223,9 +208,6 @@ class MPMFeatureExtractor:
 
         # 16x16 Grayscale 인코더 로드
         self.encoder_gray = self._load_encoder(encoder_path, name="Grayscale")
-
-        # 16x16 Canny 인코더 로드 (같은 구조, 별도 파라미터)
-        self.encoder_canny = self._load_encoder(encoder_path, name="Canny")
 
     def _load_encoder(self, encoder_path: str, name: str = "Encoder"):
         """16x16 인코더 로드"""
@@ -265,16 +247,12 @@ class MPMFeatureExtractor:
 
         return encoder
 
-    def _preprocess_for_encoder(self, image: np.ndarray, use_canny: bool = False) -> torch.Tensor:
-        """이미지를 16x16 Grayscale 또는 Canny로 전처리"""
+    def _preprocess_for_encoder(self, image: np.ndarray) -> torch.Tensor:
+        """이미지를 16x16 Grayscale로 전처리"""
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image
-
-        # Canny edge detection 적용
-        if use_canny:
-            gray = apply_canny_edge_detection(gray, self.canny_low, self.canny_high)
 
         # 4픽셀 간격 다운샘플링 (64→16)
         downsampled = gray[::4, ::4]
@@ -293,27 +271,20 @@ class MPMFeatureExtractor:
             image: [H, W, 3] numpy array (BGR)
 
         Returns:
-            features: [234] numpy array
+            features: [202] numpy array
                 - latent_gray: [32]
-                - latent_canny: [32]
                 - ORB: [(x, y, desc[32]) × 5] = [170]
         """
         # 1. 16x16 Grayscale latent 추출
-        img_gray_16x16 = self._preprocess_for_encoder(image, use_canny=False).to(self.device)
+        img_gray_16x16 = self._preprocess_for_encoder(image).to(self.device)
         with torch.no_grad():
             latent_gray, _ = self.encoder_gray(img_gray_16x16)
         latent_gray_np = latent_gray.cpu().numpy().flatten()  # [32]
 
-        # 2. 16x16 Canny latent 추출
-        img_canny_16x16 = self._preprocess_for_encoder(image, use_canny=True).to(self.device)
-        with torch.no_grad():
-            latent_canny, _ = self.encoder_canny(img_canny_16x16)
-        latent_canny_np = latent_canny.cpu().numpy().flatten()  # [32]
-
-        # 3. ORB 특징 추출
+        # 2. ORB 특징 추출
         keypoints, descriptors = self.orb_detector.detect_and_compute(image)
 
-        # 4. ORB 특징 벡터화
+        # 3. ORB 특징 벡터화
         orb_features = []
         num_kpts = len(keypoints)
 
@@ -341,8 +312,8 @@ class MPMFeatureExtractor:
 
         orb_features = np.array(orb_features, dtype=np.float32)  # [170]
 
-        # 5. 결합
-        features = np.concatenate([latent_gray_np, latent_canny_np, orb_features])  # [32 + 32 + 170 = 234]
+        # 4. 결합
+        features = np.concatenate([latent_gray_np, orb_features])  # [32 + 170 = 202]
 
         return features
 
@@ -491,10 +462,10 @@ class MPMAttentionModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # 입력 차원: latent_gray(32) + latent_canny(32) + ORB(170) = 234
-        self.input_dim = 64 + 170  # gray_latent + canny_latent + ORB features
-        self.latent_dim = 32  # 각 인코더의 latent 차원
-        self.total_latent_dim = 64  # gray(32) + canny(32)
+        # 입력 차원: latent_gray(32) + ORB(170) = 202
+        self.input_dim = 32 + 170  # gray_latent + ORB features
+        self.latent_dim = 32  # 인코더의 latent 차원
+        self.total_latent_dim = 32  # gray(32)
         self.orb_feature_dim = 34  # x, y, desc[32] per keypoint
         self.num_orb_kpts = 5
 
@@ -511,7 +482,7 @@ class MPMAttentionModel(nn.Module):
         self.loss_alpha = config.get('loss_alpha', 0.7)
 
         # Feature projection
-        self.latent_proj = nn.Linear(self.total_latent_dim, self.embed_dim)  # gray(32) + canny(32) = 64
+        self.latent_proj = nn.Linear(self.total_latent_dim, self.embed_dim)  # gray(32) = 32
         self.orb_proj = nn.Linear(32, self.embed_dim)  # descriptor만
 
         # Positional encoding
@@ -548,7 +519,7 @@ class MPMAttentionModel(nn.Module):
     def forward(self, features: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Args:
-            features: [B, 234] 추출된 특징
+            features: [B, 202] 추출된 특징
 
         Returns:
             dict with 'coordinates', 'pixel_coordinates', 'logits', 'point_names'
@@ -556,7 +527,7 @@ class MPMAttentionModel(nn.Module):
         B = features.size(0)
 
         # 1. 특징 분리
-        latent = features[:, :self.total_latent_dim]  # [B, 64] (gray 32 + canny 32)
+        latent = features[:, :self.total_latent_dim]  # [B, 32] (gray 32)
         orb_features = features[:, self.total_latent_dim:].reshape(B, self.num_orb_kpts, self.orb_feature_dim)  # [B, 5, 34]
 
         # ORB x, y, descriptor 분리
@@ -978,4 +949,4 @@ PointDetectorDataSet = DataSet
 if __name__ == "__main__":
     print("MPM Cross-Self Attention VPI 모델 (재설계 버전) 정의 완료")
     print(f"VPI 사용 가능: {VPI_AVAILABLE}")
-    print(f"특징 차원: 234 (gray_latent 32 + canny_latent 32 + ORB 170)")
+    print(f"특징 차원: 202 (gray_latent 32 + ORB 170)")
