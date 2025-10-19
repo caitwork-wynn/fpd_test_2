@@ -1027,6 +1027,100 @@ def main():
         }
     )
 
+    # 추론 속도 벤치마크 (GPU 환경)
+    log_print("\n=== 추론 속도 벤치마크 (GPU) ===")
+
+    # 속도 측정을 위한 샘플 수
+    num_speed_samples = min(100, len(test_dataset))
+
+    # 속도 측정용 DataLoader (batch_size=1)
+    speed_test_dataset = torch.utils.data.Subset(test_dataset, range(num_speed_samples))
+    speed_loader = DataLoader(
+        speed_test_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0
+    )
+
+    model.eval()
+    inference_times = []
+
+    # GPU 워밍업 (10회)
+    log_print(f"워밍업 중 (10회)...")
+    warmup_count = min(10, num_speed_samples)
+    warmup_iter = iter(speed_loader)
+    for _ in range(warmup_count):
+        try:
+            batch = next(warmup_iter)
+            data = batch['data'].to(device)
+            with torch.no_grad():
+                _ = model(data)
+            if use_cuda:
+                torch.cuda.synchronize()
+        except StopIteration:
+            break
+
+    # 실제 속도 측정
+    log_print(f"속도 측정 중 ({num_speed_samples}개 샘플)...")
+    for batch in speed_loader:
+        data = batch['data'].to(device)
+
+        if use_cuda:
+            torch.cuda.synchronize()
+
+        start_time = time.time()
+        with torch.no_grad():
+            _ = model(data)
+
+        if use_cuda:
+            torch.cuda.synchronize()
+
+        end_time = time.time()
+        inference_times.append((end_time - start_time) * 1000)  # ms로 변환
+
+    # 통계 계산
+    avg_time_ms = np.mean(inference_times)
+    min_time_ms = np.min(inference_times)
+    max_time_ms = np.max(inference_times)
+    std_time_ms = np.std(inference_times)
+    fps = 1000.0 / avg_time_ms if avg_time_ms > 0 else 0
+
+    # GPU 메모리 사용량 측정
+    gpu_memory_mb = 0
+    if use_cuda:
+        gpu_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+
+    # 결과 출력
+    log_print(f"\n샘플 수: {num_speed_samples}")
+    log_print(f"평균 추론 시간: {avg_time_ms:.2f} ms")
+    log_print(f"초당 처리량 (FPS): {fps:.2f}")
+    log_print(f"최소 시간: {min_time_ms:.2f} ms")
+    log_print(f"최대 시간: {max_time_ms:.2f} ms")
+    log_print(f"표준편차: {std_time_ms:.2f} ms")
+    if use_cuda:
+        log_print(f"GPU 메모리 사용: {gpu_memory_mb:.2f} MB")
+    log_print("=" * 60)
+
+    # 속도 벤치마크 결과 JSON 저장
+    speed_result = {
+        'num_samples': num_speed_samples,
+        'device': str(device),
+        'avg_time_ms': float(avg_time_ms),
+        'fps': float(fps),
+        'min_time_ms': float(min_time_ms),
+        'max_time_ms': float(max_time_ms),
+        'std_time_ms': float(std_time_ms),
+        'gpu_memory_mb': float(gpu_memory_mb) if use_cuda else 0,
+        'model_params': total_params,
+        'batch_size': 1,
+        'timestamp': datetime.now().isoformat()
+    }
+
+    speed_json_path = result_dir / "inference_speed.json"
+    with open(speed_json_path, 'w', encoding='utf-8') as f:
+        json.dump(speed_result, f, indent=4, ensure_ascii=False)
+    log_print(f"\n속도 벤치마크 결과 저장: {speed_json_path}")
+
     # 최종 결과 텍스트 파일 저장 (result/result_모델명.txt)
     final_txt_path = results_base_dir / f"result_{save_file_name}.txt"
     training_end_datetime = datetime.now()  # 학습 종료 시간
@@ -1063,6 +1157,21 @@ def main():
         f.write(f"학습 시작 시간: {training_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"학습 종료 시간: {training_end_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"총 학습 시간: {total_hours:02d}:{total_minutes:02d}:{total_seconds:02d}\n")
+        f.write("=" * 60 + "\n\n")
+
+        # 추론 속도 벤치마크 결과 추가
+        f.write("=" * 60 + "\n")
+        f.write("추론 속도 벤치마크 (GPU)\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"디바이스: {str(device)}\n")
+        f.write(f"샘플 수: {num_speed_samples}\n")
+        f.write(f"평균 추론 시간: {avg_time_ms:.2f} ms\n")
+        f.write(f"초당 처리량 (FPS): {fps:.2f}\n")
+        f.write(f"최소 시간: {min_time_ms:.2f} ms\n")
+        f.write(f"최대 시간: {max_time_ms:.2f} ms\n")
+        f.write(f"표준편차: {std_time_ms:.2f} ms\n")
+        if use_cuda:
+            f.write(f"GPU 메모리 사용: {gpu_memory_mb:.2f} MB\n")
         f.write("=" * 60 + "\n")
     log_print(f"최종 결과 텍스트 저장: {final_txt_path}")
 

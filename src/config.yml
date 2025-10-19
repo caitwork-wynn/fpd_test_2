@@ -1,5 +1,5 @@
 learning_model:
-  source: 'model_defs/001.mpm_cross_self_attention_vpi.py'  # floor 전용 모델로 변경
+  source: 'model_defs/100.mpm_mobilenet_base.py'  # floor 전용 모델로 변경
   # 타겟 포인트 설정 (floor만 학습)
   # target_points: ['floor']  # ['center', 'floor', 'front', 'side'] 중 선택 가능 - floor_model_attention.py의 TARGET_POINTS 사용
   # 아키텍처 설정
@@ -33,12 +33,12 @@ data:
 # 학습 설정
 training:
   batch_size: 512
-  epochs: 2000000 # 100000000
+  epochs: 20000
   learning_rate: 0.001
   weight_decay: 0.01
   optimizer: 'adamw'  # adam, adamw, sgd
   gradient_clip: 5.0
-  extract_features: true  # true면 특징을 미리 추출하여 메모리에 캐싱 (학습 속도 10-20배 향상)
+  extract_features: false  # true면 특징을 미리 추출하여 메모리에 캐싱 (학습 속도 10-20배 향상) - MobileNet은 이미지 직접 사용
 
   # 데이터 증강
   augmentation:
