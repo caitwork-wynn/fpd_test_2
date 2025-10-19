@@ -173,6 +173,41 @@ def save_model_as_onnx(
             dummy_input = torch.randn(1, input_dim)
             input_names = ['features']
             log_func(f"ONNX 변환: 특징 기반 모델 감지, 입력 차원={input_dim}")
+        elif hasattr(model, 'MODEL_NAME') and 'mobilenet' in model.MODEL_NAME.lower():
+            # MobileNet 모델: get_input_dim() 함수로부터 입력 차원 가져오기
+            try:
+                import importlib.util
+                # 모델 소스 파일 경로 찾기
+                possible_paths = [
+                    Path(__file__).parent.parent / "model_defs" / "110.mpm_mobilenet_lightweight.py",
+                ]
+
+                input_shape = None
+                for model_path in possible_paths:
+                    if model_path.exists():
+                        try:
+                            spec = importlib.util.spec_from_file_location("mobilenet_model_temp", str(model_path))
+                            mobilenet_module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mobilenet_module)
+
+                            if hasattr(mobilenet_module, 'get_input_dim'):
+                                input_shape = mobilenet_module.get_input_dim()
+                                log_func(f"ONNX 변환: MobileNet 모델 감지 ({model_path.name}), 입력 shape={input_shape}")
+                                break
+                        except Exception:
+                            continue
+
+                if input_shape is None:
+                    # fallback
+                    input_shape = (1, 96, 96)
+                    log_func(f"ONNX 변환: MobileNet 모델 감지 (기본값), 입력 shape={input_shape}")
+
+                dummy_input = torch.randn(1, *input_shape)
+                input_names = ['image']
+            except Exception as e:
+                log_func(f"ONNX 변환 경고: MobileNet 입력 차원 자동 감지 실패 ({e}), 기본값 사용")
+                dummy_input = torch.randn(1, 1, 96, 96)
+                input_names = ['image']
         elif hasattr(model, 'feature_extractor'):
             # Kornia 모델 등 이미지 입력 모델
             dummy_input = torch.randn(1, 3, 112, 112)
@@ -243,6 +278,50 @@ def save_model_as_onnx(
 
                             export_model = ONNXWrapper(model)
                             log_func("ONNX 변환: 기본 ONNX 래퍼 사용")
+                    elif hasattr(model, 'MODEL_NAME') and 'mobilenet' in model.MODEL_NAME.lower():
+                        # MobileNet 모델 전용 래퍼 시도
+                        try:
+                            import importlib.util
+                            possible_wrapper_paths = [
+                                Path(__file__).parent.parent / "model_defs" / "110.mpm_mobilenet_lightweight.py",
+                            ]
+
+                            wrapper_loaded = False
+                            for wrapper_path in possible_wrapper_paths:
+                                if wrapper_path.exists():
+                                    try:
+                                        spec = importlib.util.spec_from_file_location(
+                                            "mobilenet_model_wrapper",
+                                            str(wrapper_path)
+                                        )
+                                        mobilenet_module = importlib.util.module_from_spec(spec)
+                                        spec.loader.exec_module(mobilenet_module)
+
+                                        if hasattr(mobilenet_module, 'MPMMobileNetLightweightModelONNX'):
+                                            MPMMobileNetLightweightModelONNX = mobilenet_module.MPMMobileNetLightweightModelONNX
+                                            export_model = MPMMobileNetLightweightModelONNX(model)
+                                            log_func(f"ONNX 변환: MPMMobileNetLightweightModelONNX 래퍼 사용 ({wrapper_path.name})")
+                                            wrapper_loaded = True
+                                            break
+                                    except Exception:
+                                        continue
+
+                            if not wrapper_loaded:
+                                raise ImportError("MPMMobileNetLightweightModelONNX를 찾을 수 없음")
+
+                        except Exception:
+                            # 기본 래퍼 사용
+                            class ONNXWrapper(nn.Module):
+                                def __init__(self, model):
+                                    super().__init__()
+                                    self.model = model
+
+                                def forward(self, x):
+                                    output_dict = self.model(x)
+                                    return output_dict['coordinates']
+
+                            export_model = ONNXWrapper(model)
+                            log_func("ONNX 변환: MobileNet 기본 ONNX 래퍼 사용")
                     else:
                         class ONNXWrapper(nn.Module):
                             def __init__(self, model):

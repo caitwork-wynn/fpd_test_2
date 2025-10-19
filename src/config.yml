@@ -1,5 +1,5 @@
 learning_model:
-  source: 'model_defs/100.mpm_mobilenet_base.py'  # floor 전용 모델로 변경
+  source: 'model_defs/110.mpm_mobilenet_lightweight.py'  # floor 전용 모델로 변경
   # 타겟 포인트 설정 (floor만 학습)
   # target_points: ['floor']  # ['center', 'floor', 'front', 'side'] 중 선택 가능 - floor_model_attention.py의 TARGET_POINTS 사용
   # 아키텍처 설정
