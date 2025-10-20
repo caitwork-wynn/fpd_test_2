@@ -656,22 +656,38 @@ def main():
     final_avg_error = np.mean(non_zero_test_errors) if non_zero_test_errors else 0
     log_print(f"평균 오차: {final_avg_error:.2f} pixels")
 
-    # 참고: 다른 모델의 오차 분석 결과
+    # 실제 예측 결과 기반 상세 오차 분석
     log_print("\n" + "=" * 60)
-    log_print("=== 참고: 다른 모델의 오차 분석 ===")
-    log_print("CENTER: X= 0.7± 0.6,    Y= 0.6± 0.5,    Dist= 1.0± 0.7")
-    log_print("FLOOR : X= 3.4± 4.3,    Y= 3.5± 4.4,    Dist= 5.5± 5.6")
-    log_print("FRONT : X= 3.4± 4.3,    Y= 3.5± 4.4,    Dist= 5.5± 5.6")
-    log_print("SIDE  : X= 3.4± 4.3,    Y= 3.5± 4.4,    Dist= 5.6± 5.6")
-    log_print("전체: 평균=4.41±5.23 pixels")
-    log_print("비고) 값:좌표 오차 평균±표준편차, Dist:유클리드 거리 오차")
-    log_print("Validation Loss: 7.658129")
+    log_print("=== 포인트별 상세 오차 분석 ===")
     log_print("=" * 60)
 
-    # 포인트별 오차 출력
-    log_print("\n=== 포인트별 오차 ===")
-    for point_name, error in test_errors.items():
-        log_print(f"{point_name}: {error:.2f} pixels")
+    # 각 포인트별 상세 통계 계산 및 출력
+    all_distances = []
+    for point_name in target_points:
+        if point_name in all_test_errors and all_test_errors[point_name]['x']:
+            x_errors = all_test_errors[point_name]['x']
+            y_errors = all_test_errors[point_name]['y']
+            dist_errors = all_test_errors[point_name]['dist']
+
+            x_mean = np.mean(x_errors)
+            x_std = np.std(x_errors)
+            y_mean = np.mean(y_errors)
+            y_std = np.std(y_errors)
+            dist_mean = np.mean(dist_errors)
+            dist_std = np.std(dist_errors)
+
+            all_distances.extend(dist_errors)
+
+            log_print(f"{point_name.upper():6s}: X={x_mean:4.1f}±{x_std:4.1f},    Y={y_mean:4.1f}±{y_std:4.1f},    Dist={dist_mean:4.1f}±{dist_std:4.1f}")
+
+    # 전체 평균 계산
+    if all_distances:
+        overall_mean = np.mean(all_distances)
+        overall_std = np.std(all_distances)
+        log_print(f"전체: 평균={overall_mean:.2f}±{overall_std:.2f} pixels")
+
+    log_print("비고) 값:좌표 오차 평균±표준편차, Dist:유클리드 거리 오차")
+    log_print("=" * 60)
 
     # 모델 정보 출력
     log_print("\n=== 모델 정보 ===")
