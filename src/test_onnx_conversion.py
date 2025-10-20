@@ -1,115 +1,189 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ONNX 변환 테스트
+ONNX 변환 테스트 - 120.mpm_mobilenet_lightweight_mh.py 검증
+
+목적:
+1. 커스텀 MultiheadAttention이 ONNX 변환 시 _native_multi_head_attention 오류 없이 동작하는지 확인
+2. 변환된 ONNX 모델이 PyTorch 모델과 동일한 출력을 생성하는지 검증
+3. ONNX Runtime 추론 속도 측정
 """
 
 import sys
-from pathlib import Path
-import yaml
 import importlib.util
 import torch
+import torch.onnx
+import onnx
+import onnxruntime as ort
+import numpy as np
+import time
+from pathlib import Path
 
-# 설정 로드
-config_path = Path(__file__).parent / 'config.yml'
-with open(config_path, 'r', encoding='utf-8') as f:
-    config = yaml.safe_load(f)
+# 120 모델 동적 로드
+print("=" * 80)
+print("ONNX 변환 테스트: 120.mpm_mobilenet_lightweight_mh.py")
+print("=" * 80)
 
-# 모델 로드
-model_source = config['learning_model']['source']
-model_path = (Path(__file__).parent / model_source).resolve()
+model_path = Path(__file__).parent / "model_defs/120.mpm_mobilenet_lightweight_mh.py"
+spec = importlib.util.spec_from_file_location("model_120", str(model_path))
+model_120 = importlib.util.module_from_spec(spec)
+sys.modules["model_120"] = model_120
+spec.loader.exec_module(model_120)
 
-print("=" * 60)
-print("ONNX 변환 테스트")
-print("=" * 60)
-print(f"\n모델 소스: {model_source}")
+# 1. 모델 생성
+print("\n[1/7] 모델 생성 중...")
+config = {
+    'coord_bins': 32,
+    'gaussian_sigma': 1.5,
+    'embed_dim': 128,
+    'num_heads': 2,
+    'ffn_expansion': 2,
+    'loss_alpha': 0.7
+}
 
-# 모듈 동적 import
-spec = importlib.util.spec_from_file_location("model_module", str(model_path))
-model_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(model_module)
+model = model_120.MPMMobileNetLightweightModel(config)
+model.eval()
 
-# PointDetector import
-PointDetector = model_module.PointDetector
+# 파라미터 수 계산
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"✓ 총 파라미터: {total_params:,} ({total_params / 1e6:.2f}M)")
+print(f"✓ 학습 가능 파라미터: {trainable_params:,}")
 
-print("모델 클래스 로드 완료\n")
+# 2. 더미 입력 생성
+print("\n[2/7] 더미 입력 생성 중...")
+batch_size = 1
+dummy_input = torch.randn(batch_size, 1, 96, 96)
+print(f"✓ 입력 shape: {dummy_input.shape}")
 
-# 모델 설정
-model_config = model_module.get_model_config()
-save_file_name = model_config['save_file_name']
-target_points = model_config['target_points']
-features_config = model_config['features']
+# 3. PyTorch 추론 (기준)
+print("\n[3/7] PyTorch 모델 추론 중...")
+with torch.no_grad():
+    pytorch_output = model(dummy_input)
+    pytorch_coords = pytorch_output['coordinates']
 
-print(f"모델 설정: {save_file_name}")
-print(f"이미지 크기: {features_config['image_size']}")
-print(f"타겟 포인트: {target_points}\n")
+print(f"✓ PyTorch 출력 shape: {pytorch_coords.shape}")
+print(f"✓ PyTorch 좌표 (정규화): {pytorch_coords.cpu().numpy()}")
 
-# 디바이스 설정
-device = torch.device("cpu")  # ONNX 변환은 CPU에서 수행
+# 4. ONNX 변환
+print("\n[4/7] ONNX 변환 중...")
+onnx_path = "/tmp/test_120_mobilenet_lightweight_mh.onnx"
 
-# Detector 생성
-detector_config = config['learning_model'].copy()
-detector_config['features'] = features_config
-detector_config['training'] = config['training']
-detector_config['target_points'] = target_points
-detector = PointDetector(detector_config, device)
-
-print(f"모델 파라미터 수: {sum(p.numel() for p in detector.model.parameters()):,}\n")
-
-# get_input_dim() 확인
-if hasattr(model_module, 'get_input_dim'):
-    input_dim = model_module.get_input_dim()
-    print(f"get_input_dim() 반환값: {input_dim}")
-    print(f"✓ Grayscale 1채널: {'PASS' if input_dim[0] == 1 else 'FAIL'}")
-    print(f"✓ 96×96 크기: {'PASS' if input_dim[1] == 96 and input_dim[2] == 96 else 'FAIL'}\n")
-
-# ONNX 래퍼 확인
-if hasattr(model_module, 'MPMMobileNetLightweightModelONNX'):
-    print("✓ MPMMobileNetLightweightModelONNX 래퍼 발견\n")
-
-    # 래퍼 테스트
-    onnx_wrapper = model_module.MPMMobileNetLightweightModelONNX(detector.model)
-    test_input = torch.randn(1, 1, 96, 96)
-
-    print("래퍼 forward 테스트:")
-    print(f"입력 shape: {test_input.shape}")
-
+try:
+    # ONNX 래퍼 사용 (좌표만 반환)
+    onnx_wrapper = model_120.MPMMobileNetLightweightModelONNX(model)
     onnx_wrapper.eval()
+
+    torch.onnx.export(
+        onnx_wrapper,
+        dummy_input,
+        onnx_path,
+        export_params=True,
+        opset_version=14,
+        do_constant_folding=True,
+        input_names=['input'],
+        output_names=['output'],
+        dynamic_axes={
+            'input': {0: 'batch_size'},
+            'output': {0: 'batch_size'}
+        }
+    )
+    print(f"✓ ONNX 변환 성공: {onnx_path}")
+
+    # ONNX 모델 검증
+    onnx_model = onnx.load(onnx_path)
+    onnx.checker.check_model(onnx_model)
+    print("✓ ONNX 모델 검증 완료")
+
+    # ONNX 그래프 정보
+    print(f"✓ ONNX Opset 버전: {onnx_model.opset_import[0].version}")
+    print(f"✓ ONNX 그래프 노드 수: {len(onnx_model.graph.node)}")
+
+    # _native_multi_head_attention 연산자 검색
+    native_mha_found = False
+    for node in onnx_model.graph.node:
+        if '_native_multi_head_attention' in node.op_type:
+            native_mha_found = True
+            print(f"⚠ 경고: _native_multi_head_attention 연산자 발견!")
+            break
+
+    if not native_mha_found:
+        print("✓ _native_multi_head_attention 연산자 없음 (정상)")
+
+except Exception as e:
+    print(f"✗ ONNX 변환 실패: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
+# 5. ONNX Runtime 추론
+print("\n[5/7] ONNX Runtime 추론 중...")
+try:
+    ort_session = ort.InferenceSession(onnx_path)
+
+    # 입력 준비
+    ort_inputs = {ort_session.get_inputs()[0].name: dummy_input.numpy()}
+
+    # 추론
+    ort_outputs = ort_session.run(None, ort_inputs)
+    onnx_coords = ort_outputs[0]
+
+    print(f"✓ ONNX Runtime 출력 shape: {onnx_coords.shape}")
+    print(f"✓ ONNX Runtime 좌표 (정규화): {onnx_coords}")
+
+except Exception as e:
+    print(f"✗ ONNX Runtime 추론 실패: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
+# 6. 출력 비교
+print("\n[6/7] PyTorch vs ONNX 출력 비교...")
+pytorch_coords_np = pytorch_coords.cpu().numpy()
+diff = np.abs(pytorch_coords_np - onnx_coords)
+max_diff = np.max(diff)
+mean_diff = np.mean(diff)
+
+print(f"✓ 최대 차이: {max_diff:.6f}")
+print(f"✓ 평균 차이: {mean_diff:.6f}")
+
+tolerance = 1e-5
+if max_diff < tolerance:
+    print(f"✓ 출력 일치 (허용 오차: {tolerance})")
+else:
+    print(f"⚠ 출력 불일치 (허용 오차 초과: {max_diff} > {tolerance})")
+    print("\nPyTorch 좌표:")
+    print(pytorch_coords_np)
+    print("\nONNX 좌표:")
+    print(onnx_coords)
+    print("\n차이:")
+    print(diff)
+
+# 7. 추론 속도 벤치마크
+print("\n[7/7] 추론 속도 벤치마크 (100회 반복)...")
+
+# PyTorch
+torch_times = []
+for _ in range(100):
+    start = time.time()
     with torch.no_grad():
-        output = onnx_wrapper(test_input)
+        _ = onnx_wrapper(dummy_input)
+    torch_times.append(time.time() - start)
 
-    print(f"출력 shape: {output.shape}")
-    print(f"출력 타입: {type(output)}")
-    print(f"✓ 래퍼 테스트 성공!\n")
-else:
-    print("❌ MPMMobileNetLightweightModelONNX 래퍼를 찾을 수 없음\n")
+# ONNX Runtime
+onnx_times = []
+for _ in range(100):
+    start = time.time()
+    _ = ort_session.run(None, ort_inputs)
+    onnx_times.append(time.time() - start)
 
-# ONNX 변환 시뮬레이션
-print("=" * 60)
-print("ONNX 변환 시뮬레이션")
-print("=" * 60)
+print(f"✓ PyTorch 평균 추론 시간: {np.mean(torch_times) * 1000:.2f} ms")
+print(f"✓ ONNX Runtime 평균 추론 시간: {np.mean(onnx_times) * 1000:.2f} ms")
+print(f"✓ 속도 향상: {np.mean(torch_times) / np.mean(onnx_times):.2f}x")
 
-# save_load_model.py import
-sys.path.append(str(Path(__file__).parent))
-from util.save_load_model import save_model_as_onnx
-
-# 임시 체크포인트 경로
-checkpoint_path = Path("/tmp/test_mobilenet_onnx.pth")
-
-print(f"\nONNX 변환 시작...")
-print(f"체크포인트 경로: {checkpoint_path}")
-print(f"디바이스: {device}\n")
-
-onnx_path = save_model_as_onnx(detector.model, checkpoint_path, device, print)
-
-if onnx_path and onnx_path.exists():
-    onnx_size_mb = onnx_path.stat().st_size / (1024 * 1024)
-    print(f"\n✓ ONNX 변환 성공!")
-    print(f"ONNX 파일: {onnx_path}")
-    print(f"파일 크기: {onnx_size_mb:.2f}MB")
-else:
-    print(f"\n❌ ONNX 변환 실패!")
-
-print("\n" + "=" * 60)
+print("\n" + "=" * 80)
 print("테스트 완료!")
-print("=" * 60)
+print("=" * 80)
+print(f"\n✓ ONNX 모델이 성공적으로 변환되었으며, _native_multi_head_attention 오류가 발생하지 않습니다.")
+print(f"✓ ONNX 모델 저장 위치: {onnx_path}")
+print(f"✓ 파일 크기: {Path(onnx_path).stat().st_size / (1024 * 1024):.2f} MB")

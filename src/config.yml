@@ -1,5 +1,5 @@
 learning_model:
-  source: 'model_defs/110.mpm_mobilenet_lightweight.py'  # floor 전용 모델로 변경
+  source: 'model_defs/120.mpm_mobilenet_lightweight_mh.py'  # floor 전용 모델로 변경
   # 모델 저장 설정
   checkpointing:
     save_dir: '../model'
@@ -14,7 +14,7 @@ data:
   test_id_suffix: '1'
   validation_ratio: 0.2
   random_seed: 42
-  max_train_images: 0  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
+  max_train_images: 1000  # 학습 이미지 수 제한 (0이면 모두 사용, 100이면 100개만 사용)
 
 # 학습 설정
 training:
