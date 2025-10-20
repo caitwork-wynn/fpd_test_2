@@ -40,7 +40,21 @@
       "Bash(sudo -S apt-get install:*)",
       "Bash(echo:*)",
       "Bash(LD_LIBRARY_PATH=/opt/nvidia/vpi3/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH python3:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(pip3 install:*)",
+      "Bash(git push)",
+      "Bash(awk:*)",
+      "Bash(pgrep:*)",
+      "Bash(tee:*)",
+      "Read(//tmp/**)",
+      "Bash(pkill:*)",
+      "Bash(PYTHONDONTWRITEBYTECODE=1 timeout 20 python3:*)",
+      "Bash(PYTHONDONTWRITEBYTECODE=1 timeout 30 python3:*)",
+      "Bash(cat:*)",
+      "Bash(kill:*)",
+      "Bash(PYTHONDONTWRITEBYTECODE=1 timeout 300 python3:*)",
+      "Bash(PYTHONUNBUFFERED=1 timeout 25 python3:*)",
+      "Bash(pip3 list:*)"
     ],
     "deny": [],
     "ask": []
