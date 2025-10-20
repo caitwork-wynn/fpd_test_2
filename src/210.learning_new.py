@@ -558,66 +558,66 @@ def main():
     best_model_time_loaded = None  # 로드된 시간 정보
 
     try:
-        # 먼저 epoch 파일 로드 시도 (최신 epoch 파일 우선)
+        # 먼저 Best 모델 로드 시도 (Best 파일 우선)
         loaded_epoch = load_model(
             model=model,
             optimizer=optimizer,
             save_dir=str(checkpoint_dir),
             model_name=save_file_name,
-            load_best=False,  # epoch 파일 로드
+            load_best=True,  # best 모델 로드
             device=device
         )
 
-        if loaded_epoch > 0:
-            log_print(f"Epoch {loaded_epoch} 모델에서 학습 재개")
-            start_epoch = loaded_epoch
+        if loaded_epoch == -1:  # best 모델
+            log_print("Best 모델에서 학습 재개")
+            # best 모델에서 재개할 때는 실제 epoch 정보를 체크포인트에서 읽어야 함
+            best_checkpoint_path = checkpoint_dir / f"{save_file_name}_best.pth"
+            checkpoint = torch.load(str(best_checkpoint_path), map_location=device, weights_only=False)
+            start_epoch = checkpoint.get('epoch', 0)
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            best_model_time_loaded = checkpoint.get('best_model_time', None)
 
-            # epoch 파일에서 best_val_loss 정보 복원 시도
-            epoch_checkpoint_path = checkpoint_dir / f"{save_file_name}_epoch{loaded_epoch}.pth"
-            if epoch_checkpoint_path.exists():
-                checkpoint = torch.load(str(epoch_checkpoint_path), map_location=device, weights_only=False)
-                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-                best_model_time_loaded = checkpoint.get('best_model_time', None)
-
-                # feature_mean, feature_std 복원 (있는 경우)
-                if 'feature_mean' in checkpoint:
-                    detector.feature_mean = checkpoint['feature_mean']
-                    detector.feature_std = checkpoint['feature_std']
+            # feature_mean, feature_std 복원 (있는 경우)
+            if 'feature_mean' in checkpoint:
+                detector.feature_mean = checkpoint['feature_mean']
+                detector.feature_std = checkpoint['feature_std']
 
         log_print(f"에폭 {start_epoch}부터 학습 재개")
         log_print(f"이전 최고 검증 손실: {best_val_loss:.6f}")
 
     except FileNotFoundError:
-        # epoch 파일이 없으면 best 모델 로드 시도
+        # Best 파일이 없으면 epoch 파일 로드 시도
         try:
             loaded_epoch = load_model(
                 model=model,
                 optimizer=optimizer,
                 save_dir=str(checkpoint_dir),
                 model_name=save_file_name,
-                load_best=True,  # best 모델 로드
+                load_best=False,  # epoch 파일 로드
                 device=device
             )
 
-            if loaded_epoch == -1:  # best 모델
-                log_print("Best 모델에서 학습 재개 (epoch 파일 없음)")
-                # best 모델에서 재개할 때는 실제 epoch 정보를 체크포인트에서 읽어야 함
-                best_checkpoint_path = checkpoint_dir / f"{save_file_name}_best.pth"
-                checkpoint = torch.load(str(best_checkpoint_path), map_location=device, weights_only=False)
-                start_epoch = checkpoint.get('epoch', 0)
-                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-                best_model_time_loaded = checkpoint.get('best_model_time', None)
+            if loaded_epoch > 0:
+                log_print(f"Epoch {loaded_epoch} 모델에서 학습 재개 (Best 파일 없음)")
+                start_epoch = loaded_epoch
 
-                # feature_mean, feature_std 복원 (있는 경우)
-                if 'feature_mean' in checkpoint:
-                    detector.feature_mean = checkpoint['feature_mean']
-                    detector.feature_std = checkpoint['feature_std']
+                # epoch 파일에서 best_val_loss 정보 복원 시도
+                epoch_checkpoint_path = checkpoint_dir / f"{save_file_name}_epoch{loaded_epoch}.pth"
+                if epoch_checkpoint_path.exists():
+                    checkpoint = torch.load(str(epoch_checkpoint_path), map_location=device, weights_only=False)
+                    best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                    best_model_time_loaded = checkpoint.get('best_model_time', None)
+
+                    # feature_mean, feature_std 복원 (있는 경우)
+                    if 'feature_mean' in checkpoint:
+                        detector.feature_mean = checkpoint['feature_mean']
+                        detector.feature_std = checkpoint['feature_std']
 
             log_print(f"에폭 {start_epoch}부터 학습 재개")
             log_print(f"이전 최고 검증 손실: {best_val_loss:.6f}")
 
         except FileNotFoundError:
-            # epoch 파일도 없고 best 파일도 없으면 새로운 학습
+            # Best 파일도 없고 epoch 파일도 없으면 새로운 학습
             log_print("새로운 학습 시작")
             start_epoch = 0
 

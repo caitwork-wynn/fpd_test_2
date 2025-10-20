@@ -24,6 +24,8 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from PIL import Image
+import time
+import json
 
 # 경고 억제
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.onnx")
@@ -52,8 +54,24 @@ def validate(model, dataloader, device, data_path=None):
     # 포인트 이름 자동 감지
     if 'point_names' in sample_output:
         point_names = sample_output['point_names']
+        # 리스트가 아니면 리스트로 변환
+        if not isinstance(point_names, list):
+            point_names = list(point_names) if hasattr(point_names, '__iter__') and not isinstance(point_names, str) else [point_names]
     elif 'point_names' in sample_batch:
-        point_names = sample_batch['point_names']
+        # DataLoader의 default_collate가 배치의 point_names를 zip하기 때문에
+        # [('center', 'center', ...), ('floor', 'floor', ...), ...] 형태가 됨
+        # 각 튜플의 첫 번째 요소만 가져와서 고유한 리스트를 만듦
+        point_names_raw = sample_batch['point_names']
+        if isinstance(point_names_raw, (list, tuple)) and len(point_names_raw) > 0:
+            if isinstance(point_names_raw[0], (tuple, list)):
+                # zip된 형태: [('center', 'center'), ('floor', 'floor'), ...]
+                # 각 튜플의 첫 번째 요소만 가져옴
+                point_names = [item[0] if isinstance(item, (tuple, list)) else item for item in point_names_raw]
+            else:
+                # 이미 단순 리스트: ['center', 'floor', 'front', 'side']
+                point_names = list(point_names_raw)
+        else:
+            point_names = list(point_names_raw) if hasattr(point_names_raw, '__iter__') and not isinstance(point_names_raw, str) else [point_names_raw]
     else:
         # 좌표 개수로부터 추론
         num_coords = sample_output['coordinates'].shape[1]
@@ -63,6 +81,10 @@ def validate(model, dataloader, device, data_path=None):
             point_names = ['center', 'floor', 'front', 'side']
         else:
             point_names = [f'point_{i//2}' for i in range(0, num_coords, 2)]
+
+    # point_names가 리스트인지 확인 및 기본값 설정
+    if not isinstance(point_names, list) or len(point_names) == 0:
+        point_names = ['center', 'floor', 'front', 'side']  # 기본값
 
     all_errors = {}
     for name in point_names:
@@ -217,15 +239,46 @@ def create_visualization_grid(detailed_results, output_path, num_samples=40, gri
         # 포인트 그리기 (이미지에 직접)
         img_copy = img.copy()
 
-        # 파란색으로 실제 좌표 그리기
+        # 원본 이미지 크기 가져오기
+        orig_h, orig_w = img.shape[:2]
+
+        # 96x96 좌표를 원본 이미지 크기로 스케일링
+        # 모델 입력 크기는 96x96이므로 이를 기준으로 스케일 계산
+        model_size = 96.0
+        scale_x = orig_w / model_size
+        scale_y = orig_h / model_size
+
+        # 포인트별 색상 정의 (RGB)
+        point_colors = {
+            'center': (0, 255, 0),      # 초록색
+            'floor': (255, 255, 0),     # 노란색
+            'front': (255, 0, 255),     # 자홍색
+            'side': (0, 255, 255)       # 청록색
+        }
+
+        # 파란색으로 실제 좌표 그리기 (이중 원 구조)
         labeled = result['labeled']
         for point_name, (x, y) in labeled.items():
-            cv2.circle(img_copy, (int(x), int(y)), 5, (0, 0, 255), -1)  # 파란색
+            # 96x96 스케일의 좌표를 원본 크기로 변환
+            scaled_x = int(x * scale_x)
+            scaled_y = int(y * scale_y)
+            # 외각: 포인트별 색상 (큰 원, 테두리만)
+            point_color = point_colors.get(point_name, (128, 128, 128))  # 기본값: 회색
+            cv2.circle(img_copy, (scaled_x, scaled_y), 8, point_color, 2)
+            # 내부: 파란색 (작은 원, 채움)
+            cv2.circle(img_copy, (scaled_x, scaled_y), 5, (0, 0, 255), -1)
 
-        # 빨간색으로 예측 좌표 그리기
+        # 빨간색으로 예측 좌표 그리기 (이중 원 구조)
         predict = result['predict']
         for point_name, (x, y) in predict.items():
-            cv2.circle(img_copy, (int(x), int(y)), 5, (255, 0, 0), -1)  # 빨간색
+            # 96x96 스케일의 좌표를 원본 크기로 변환
+            scaled_x = int(x * scale_x)
+            scaled_y = int(y * scale_y)
+            # 외각: 포인트별 색상 (큰 원, 테두리만)
+            point_color = point_colors.get(point_name, (128, 128, 128))  # 기본값: 회색
+            cv2.circle(img_copy, (scaled_x, scaled_y), 8, point_color, 2)
+            # 내부: 빨간색 (작은 원, 채움)
+            cv2.circle(img_copy, (scaled_x, scaled_y), 5, (255, 0, 0), -1)
 
         # 이미지 표시
         ax.imshow(img_copy)
@@ -270,15 +323,21 @@ def main():
     parser.add_argument(
         '--model_path',
         type=str,
-        default='../model/floor_attention_pre_trained.pth',
-        help='테스트할 모델 파일 경로 (기본값: ../model/floor_attention_pre_trained.pth)'
+        default='../model/mpm_110_mobilenet_lightweight_96_best.pth',
+        help='테스트할 모델 가중치 파일 경로 (기본값: ../model/mpm_110_mobilenet_lightweight_96_best.pth)'
+    )
+    parser.add_argument(
+        '--model_source',
+        type=str,
+        default=None,
+        help='모델 정의 소스 파일 경로 (기본값: config.yml의 learning_model->source 사용)'
     )
     args = parser.parse_args()
 
     print("=" * 60)
     print("범용 다중 포인트 검출 모델 테스트")
-    print("- config.yml 기반 동적 모델 로딩")
-    print(f"- 모델 파일: {args.model_path}")
+    print("- 동적 모델 로딩")
+    print(f"- 모델 가중치 파일: {args.model_path}")
     print("=" * 60)
 
     # 설정 로드
@@ -286,14 +345,18 @@ def main():
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
-    # 설정 정보 읽기
-    save_file_name = config['learning_model']['checkpointing']['save_file_name']
-
     # 동적 모델 import
-    model_source = config['learning_model']['source']
+    # argument로 model_source가 지정되면 해당 파일 사용, 아니면 config.yml 사용
+    if args.model_source:
+        model_source = args.model_source
+        print(f"- 모델 소스 (argument): {model_source}")
+    else:
+        model_source = config['learning_model']['source']
+        print(f"- 모델 소스 (config.yml): {model_source}")
+
     model_path = (Path(__file__).parent / model_source).resolve()
 
-    print(f"\n모델 로딩: {model_path}")
+    print(f"\n모델 정의 로딩: {model_path}")
 
     # 모듈 동적 import
     spec = importlib.util.spec_from_file_location("model_module", str(model_path))
@@ -307,6 +370,27 @@ def main():
     PointDetectorDataSetWithAutoencoder = getattr(model_module, 'PointDetectorDataSetWithAutoencoder', None)
 
     print("모델 클래스 로드 완료")
+
+    # 모델 설정 가져오기 (get_model_config 함수가 있는 경우)
+    if hasattr(model_module, 'get_model_config'):
+        model_config = model_module.get_model_config()
+        save_file_name = model_config['save_file_name']
+        target_points = model_config['target_points']
+        use_fpd_architecture = model_config['use_fpd_architecture']
+        features_config = model_config['features']
+        print(f"모델 설정 로드: {save_file_name}")
+        print(f"타겟 포인트: {target_points}")
+        print(f"FPD 아키텍처: {use_fpd_architecture}")
+    else:
+        # get_model_config가 없는 경우 config.yml에서 읽기 (하위 호환성)
+        save_file_name = config.get('learning_model', {}).get('checkpointing', {}).get('save_file_name', 'model')
+        target_points = config.get('learning_model', {}).get('target_points', None)
+        use_fpd_architecture = config.get('learning_model', {}).get('architecture', {}).get('use_fpd_architecture', False)
+        features_config = config.get('learning_model', {}).get('architecture', {}).get('features', {
+            'image_size': [112, 112],
+            'grid_size': 7
+        })
+        print(f"모델 설정 로드 (config.yml): {save_file_name}")
 
     # 경로 설정
     base_dir = Path(__file__).parent
@@ -330,15 +414,16 @@ def main():
     log_print("\n모델 초기화...")
     # learning_model 섹션과 features 섹션을 합쳐서 전달
     detector_config = config['learning_model'].copy()
-    detector_config['features'] = config['learning_model']['architecture']['features']
+    detector_config['features'] = features_config  # 모듈에서 가져온 설정 사용
     detector_config['training'] = config['training']
+    detector_config['target_points'] = target_points  # 모듈에서 가져온 타겟 포인트
+    detector_config['use_fpd_architecture'] = use_fpd_architecture  # 모듈에서 가져온 아키텍처 설정
     detector = PointDetector(detector_config, device)
     model = detector.model
 
     # 모델 아키텍처 정보 출력
     log_print("\n=== 모델 아키텍처 ===")
     log_print(f"모델 소스: {model_source}")
-    features_config = config['learning_model']['architecture']['features']
     log_print(f"입력: 3x{features_config['image_size'][0]}x{features_config['image_size'][1]} 이미지")
     log_print(f"그리드 크기: {features_config['grid_size']}x{features_config['grid_size']}")
 
@@ -351,7 +436,7 @@ def main():
     # 테스트 데이터셋 생성
     log_print("\n테스트 데이터셋 생성 중...")
 
-    # config 형식 맞추기
+    # config 형식 맞추기 (DataSet 클래스가 필요로 하는 구조 생성)
     dataset_config = config.copy()
     if 'data_split' not in dataset_config:
         dataset_config['data_split'] = {
@@ -360,20 +445,26 @@ def main():
             'random_seed': config['data'].get('random_seed', 42)
         }
 
+    # learning_model 섹션 추가/업데이트 (DataSet이 image_size에 접근할 수 있도록)
+    if 'learning_model' not in dataset_config:
+        dataset_config['learning_model'] = {}
+    if 'architecture' not in dataset_config['learning_model']:
+        dataset_config['learning_model']['architecture'] = {}
+    dataset_config['learning_model']['architecture']['features'] = features_config
+
     # extract_features 옵션 읽기
     extract_features = config['training'].get('extract_features', False)
 
-    # 타겟 포인트 설정 읽기
-    target_points = config.get('learning_model', {}).get('target_points', None)
+    # 타겟 포인트 정보 출력 (이미 모듈에서 로드됨)
     if target_points:
         log_print(f"타겟 포인트: {', '.join(target_points)}")
 
-    # Autoencoder 사용 여부 확인
-    use_autoencoder = config['learning_model']['architecture']['features'].get('use_autoencoder', False)
+    # Autoencoder 사용 여부 확인 (모듈 설정에서 가져옴)
+    use_autoencoder = features_config.get('use_autoencoder', False)
 
     if use_autoencoder and PointDetectorDataSetWithAutoencoder is not None:
         log_print("Autoencoder 기반 특성 추출 사용")
-        encoder_path = config['learning_model']['architecture']['features'].get('encoder_path', '../model/autoencoder_16x16_best.pth')
+        encoder_path = features_config.get('encoder_path', '../model/autoencoder_16x16_best.pth')
 
         test_dataset = PointDetectorDataSetWithAutoencoder(
             source_folder=str(data_path),
@@ -409,16 +500,102 @@ def main():
 
     log_print(f"테스트 데이터: {len(test_dataset)}개")
 
+    # 테스트 데이터 좌표 통계 계산 및 출력
+    log_print("\n=== 테스트 데이터 레이블 좌표 통계 ===")
+
+    # 테스트 데이터셋의 모든 타겟 좌표 수집
+    all_targets = []
+    # targets 속성이 있는지 확인 (특징 사전 추출 모드)
+    if hasattr(test_dataset, 'targets') and test_dataset.targets is not None:
+        for i in range(len(test_dataset.targets)):
+            target = test_dataset.targets[i].numpy()
+            if target.ndim == 1:
+                all_targets.append(target)
+            else:
+                all_targets.append(target.flatten())
+        all_targets = np.array(all_targets)  # [N, num_coords]
+    else:
+        # On-the-fly 처리 모드: DataLoader를 통해 타겟 수집
+        for batch in test_loader:
+            batch_targets = batch['targets'].numpy()  # [B, num_coords]
+            for i in range(len(batch_targets)):
+                all_targets.append(batch_targets[i])
+        all_targets = np.array(all_targets) if len(all_targets) > 0 else np.array([])  # [N, num_coords]
+
+    # 각 좌표별 통계 계산 (정규화된 값)
+    coord_stats_normalized = {}
+    coord_stats_pixel = {}
+
+    for idx, point_name in enumerate(target_points):
+        x_idx = idx * 2
+        y_idx = idx * 2 + 1
+
+        # 정규화된 좌표의 평균과 표준편차
+        x_norm_mean = np.mean(all_targets[:, x_idx])
+        x_norm_std = np.std(all_targets[:, x_idx])
+        y_norm_mean = np.mean(all_targets[:, y_idx])
+        y_norm_std = np.std(all_targets[:, y_idx])
+
+        coord_stats_normalized[point_name] = {
+            'x_mean': x_norm_mean,
+            'x_std': x_norm_std,
+            'y_mean': y_norm_mean,
+            'y_std': y_norm_std
+        }
+
+        # 픽셀 좌표로 변환
+        x_pixel_vals = all_targets[:, x_idx] * (test_dataset.coord_max_x - test_dataset.coord_min_x) + test_dataset.coord_min_x
+        y_pixel_vals = all_targets[:, y_idx] * (test_dataset.coord_max_y - test_dataset.coord_min_y) + test_dataset.coord_min_y
+
+        x_pixel_mean = np.mean(x_pixel_vals)
+        x_pixel_std = np.std(x_pixel_vals)
+        y_pixel_mean = np.mean(y_pixel_vals)
+        y_pixel_std = np.std(y_pixel_vals)
+
+        coord_stats_pixel[point_name] = {
+            'x_mean': x_pixel_mean,
+            'x_std': x_pixel_std,
+            'y_mean': y_pixel_mean,
+            'y_std': y_pixel_std
+        }
+
+        # 화면 출력
+        log_print(f"\n[{point_name.upper()}]")
+        log_print(f"  픽셀 좌표:")
+        log_print(f"    X: 평균 = {x_pixel_mean:.2f}px, 표준편차 = {x_pixel_std:.2f}px")
+        log_print(f"    Y: 평균 = {y_pixel_mean:.2f}px, 표준편차 = {y_pixel_std:.2f}px")
+
+    log_print(f"\n총 테스트 샘플 수: {len(all_targets)}")
+    log_print("=" * 60)
+
     # 모델 가중치 로드
     model_path_to_load = Path(base_dir) / args.model_path
     if not model_path_to_load.exists():
         log_print(f"\n오류: 모델 파일을 찾을 수 없습니다: {model_path_to_load}")
         return
 
-    log_print(f"\n모델 로드 중: {model_path_to_load}")
+    log_print(f"\n모델 가중치 로드 중: {model_path_to_load}")
 
     try:
         checkpoint = torch.load(str(model_path_to_load), map_location=device, weights_only=False)
+
+        # 체크포인트에서 모델 설정 정보 읽기
+        if 'model_config' in checkpoint:
+            checkpoint_model_source = checkpoint['model_config'].get('learning_model', {}).get('source', 'Unknown')
+            log_print(f"체크포인트 모델 소스: {checkpoint_model_source}")
+
+            # 모델 소스 불일치 경고
+            if checkpoint_model_source != 'Unknown' and checkpoint_model_source != model_source:
+                log_print(f"\n{'='*60}")
+                log_print(f"경고: 모델 소스 불일치 감지!")
+                log_print(f"  - 현재 모델 소스: {model_source}")
+                log_print(f"  - 체크포인트 모델 소스: {checkpoint_model_source}")
+                log_print(f"")
+                log_print(f"해결 방법:")
+                log_print(f"  1. config.yml의 learning_model->source를 '{checkpoint_model_source}'로 변경하거나")
+                log_print(f"  2. --model_source 옵션으로 올바른 모델 소스 파일 지정:")
+                log_print(f"     python 299.inference_pretrained_model.py --model_source {checkpoint_model_source} --model_path {args.model_path}")
+                log_print(f"{'='*60}\n")
 
         # 모델 가중치 로드
         if 'model_state_dict' in checkpoint:
@@ -438,10 +615,27 @@ def main():
         if 'best_val_loss' in checkpoint:
             log_print(f"모델 검증 손실: {checkpoint['best_val_loss']:.6f}")
 
-        log_print("모델 로드 완료\n")
+        log_print("모델 가중치 로드 완료\n")
 
     except Exception as e:
-        log_print(f"\n오류: 모델 로드 실패 - {e}")
+        log_print(f"\n{'='*60}")
+        log_print(f"오류: 모델 가중치 로드 실패")
+        log_print(f"{'='*60}")
+        log_print(f"오류 내용: {str(e)[:200]}...")
+        log_print(f"")
+        log_print(f"현재 설정:")
+        log_print(f"  - 모델 소스: {model_source}")
+        log_print(f"  - 모델 가중치: {model_path_to_load}")
+        log_print(f"")
+        log_print(f"가능한 원인:")
+        log_print(f"  1. 모델 소스 파일과 가중치 파일이 서로 다른 아키텍처")
+        log_print(f"  2. 가중치 파일이 손상되었거나 호환되지 않는 버전")
+        log_print(f"")
+        log_print(f"해결 방법:")
+        log_print(f"  1. --model_source 옵션으로 올바른 모델 소스 지정")
+        log_print(f"  2. --model_path 옵션으로 올바른 가중치 파일 지정")
+        log_print(f"  3. 모델을 새로 학습하여 호환되는 가중치 생성")
+        log_print(f"{'='*60}\n")
         return
 
     # 테스트 데이터 평가
@@ -461,6 +655,18 @@ def main():
     non_zero_test_errors = [v for v in test_errors.values() if v > 0]
     final_avg_error = np.mean(non_zero_test_errors) if non_zero_test_errors else 0
     log_print(f"평균 오차: {final_avg_error:.2f} pixels")
+
+    # 참고: 다른 모델의 오차 분석 결과
+    log_print("\n" + "=" * 60)
+    log_print("=== 참고: 다른 모델의 오차 분석 ===")
+    log_print("CENTER: X= 0.7± 0.6,    Y= 0.6± 0.5,    Dist= 1.0± 0.7")
+    log_print("FLOOR : X= 3.4± 4.3,    Y= 3.5± 4.4,    Dist= 5.5± 5.6")
+    log_print("FRONT : X= 3.4± 4.3,    Y= 3.5± 4.4,    Dist= 5.5± 5.6")
+    log_print("SIDE  : X= 3.4± 4.3,    Y= 3.5± 4.4,    Dist= 5.6± 5.6")
+    log_print("전체: 평균=4.41±5.23 pixels")
+    log_print("비고) 값:좌표 오차 평균±표준편차, Dist:유클리드 거리 오차")
+    log_print("Validation Loss: 7.658129")
+    log_print("=" * 60)
 
     # 포인트별 오차 출력
     log_print("\n=== 포인트별 오차 ===")
@@ -524,11 +730,173 @@ def main():
     except Exception as e:
         log_print(f"시각화 이미지 생성 실패: {e}")
 
+    # 추론 속도 벤치마크 (GPU 환경)
+    log_print("\n=== 추론 속도 벤치마크 (GPU) ===")
+
+    # 속도 측정을 위한 샘플 수
+    num_speed_samples = min(100, len(test_dataset))
+
+    # 속도 측정용 DataLoader (batch_size=1)
+    speed_test_dataset = torch.utils.data.Subset(test_dataset, range(num_speed_samples))
+    speed_loader = DataLoader(
+        speed_test_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0
+    )
+
+    model.eval()
+    inference_times = []
+
+    # GPU 워밍업 (10회)
+    log_print(f"워밍업 중 (10회)...")
+    warmup_count = min(10, num_speed_samples)
+    warmup_iter = iter(speed_loader)
+    for _ in range(warmup_count):
+        try:
+            batch = next(warmup_iter)
+            data = batch['data'].to(device)
+            with torch.no_grad():
+                _ = model(data)
+            if use_cuda:
+                torch.cuda.synchronize()
+        except StopIteration:
+            break
+
+    # 실제 속도 측정
+    log_print(f"속도 측정 중 ({num_speed_samples}개 샘플)...")
+    for batch in speed_loader:
+        data = batch['data'].to(device)
+
+        if use_cuda:
+            torch.cuda.synchronize()
+
+        start_time = time.time()
+        with torch.no_grad():
+            _ = model(data)
+
+        if use_cuda:
+            torch.cuda.synchronize()
+
+        end_time = time.time()
+        inference_times.append((end_time - start_time) * 1000)  # ms로 변환
+
+    # 통계 계산
+    avg_time_ms = np.mean(inference_times)
+    min_time_ms = np.min(inference_times)
+    max_time_ms = np.max(inference_times)
+    std_time_ms = np.std(inference_times)
+    fps = 1000.0 / avg_time_ms if avg_time_ms > 0 else 0
+
+    # GPU 메모리 사용량 측정
+    gpu_memory_mb = 0
+    if use_cuda:
+        gpu_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+
+    # 결과 출력
+    log_print(f"\n샘플 수: {num_speed_samples}개 (각 이미지 개별 측정)")
+    log_print(f"평균 추론 시간 (이미지당): {avg_time_ms:.2f} ms")
+    log_print(f"초당 처리량 (FPS): {fps:.2f}")
+    log_print(f"최소 시간 (이미지당): {min_time_ms:.2f} ms")
+    log_print(f"최대 시간 (이미지당): {max_time_ms:.2f} ms")
+    log_print(f"표준편차: {std_time_ms:.2f} ms")
+    if use_cuda:
+        log_print(f"GPU 메모리 사용: {gpu_memory_mb:.2f} MB")
+    log_print("=" * 60)
+
+    # 속도 벤치마크 결과 JSON 저장
+    speed_result = {
+        'num_samples': num_speed_samples,
+        'measurement_unit': 'per_image',
+        'device': str(device),
+        'avg_time_ms_per_image': float(avg_time_ms),
+        'fps': float(fps),
+        'min_time_ms_per_image': float(min_time_ms),
+        'max_time_ms_per_image': float(max_time_ms),
+        'std_time_ms': float(std_time_ms),
+        'gpu_memory_mb': float(gpu_memory_mb) if use_cuda else 0,
+        'model_params': total_params,
+        'batch_size': 1,
+        'timestamp': datetime.now().isoformat()
+    }
+
+    speed_json_path = result_dir / f"inference_speed_{timestamp}.json"
+    with open(speed_json_path, 'w', encoding='utf-8') as f:
+        json.dump(speed_result, f, indent=4, ensure_ascii=False)
+    log_print(f"\n속도 벤치마크 결과 저장: {speed_json_path}")
+
+    # 통합 결과 텍스트 파일 생성 (result/inference_result_모델명_timestamp.txt)
+    final_txt_path = result_dir / f"inference_result_{save_file_name}_{timestamp}.txt"
+
+    with open(final_txt_path, 'w', encoding='utf-8') as f:
+        # 테스트 데이터 레이블 좌표 통계 추가
+        f.write("=" * 60 + "\n")
+        f.write("테스트 데이터 레이블 좌표 통계\n")
+        f.write("=" * 60 + "\n\n")
+
+        for point_name in target_points:
+            stats_norm = coord_stats_normalized[point_name]
+            stats_pix = coord_stats_pixel[point_name]
+
+            f.write(f"[{point_name.upper()}]\n")
+            f.write(f"  픽셀 좌표:\n")
+            f.write(f"    X: 평균 = {stats_pix['x_mean']:.2f}px, 표준편차 = {stats_pix['x_std']:.2f}px\n")
+            f.write(f"    Y: 평균 = {stats_pix['y_mean']:.2f}px, 표준편차 = {stats_pix['y_std']:.2f}px\n\n")
+
+        f.write(f"총 테스트 샘플 수: {len(all_targets)}\n")
+        f.write("=" * 60 + "\n\n")
+
+        # 테스트 결과
+        f.write("=== 테스트 데이터 최종 평가 ===\n\n")
+        for line in output_lines:
+            f.write(line + "\n")
+        f.write(f"\n테스트 손실: {test_loss:.6f}\n")
+        f.write(f"평균 오차: {final_avg_error:.2f} pixels\n\n")
+
+        # 포인트별 오차 출력
+        f.write("=== 포인트별 오차 ===\n")
+        for point_name, error in test_errors.items():
+            f.write(f"{point_name}: {error:.2f} pixels\n")
+        f.write("\n")
+
+        # 추론 속도 벤치마크 결과 추가
+        f.write("=" * 60 + "\n")
+        f.write("추론 속도 벤치마크 (GPU)\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"디바이스: {str(device)}\n")
+        f.write(f"샘플 수: {num_speed_samples}개 (각 이미지 개별 측정)\n")
+        f.write(f"평균 추론 시간 (이미지당): {avg_time_ms:.2f} ms\n")
+        f.write(f"초당 처리량 (FPS): {fps:.2f}\n")
+        f.write(f"최소 시간 (이미지당): {min_time_ms:.2f} ms\n")
+        f.write(f"최대 시간 (이미지당): {max_time_ms:.2f} ms\n")
+        f.write(f"표준편차: {std_time_ms:.2f} ms\n")
+        if use_cuda:
+            f.write(f"GPU 메모리 사용: {gpu_memory_mb:.2f} MB\n")
+        f.write("\n")
+
+        # 모델 정보 추가
+        f.write("=" * 60 + "\n")
+        f.write("모델 정보\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"모델 파일: {model_path_to_load}\n")
+        f.write(f"모델 소스: {model_source}\n")
+        f.write(f"총 파라미터: {total_params:,}\n")
+        f.write(f"학습 가능 파라미터: {trainable_params:,}\n")
+        if 'epoch' in checkpoint:
+            f.write(f"모델 에폭: {checkpoint['epoch']}\n")
+        if 'best_val_loss' in checkpoint:
+            f.write(f"검증 손실: {checkpoint['best_val_loss']:.6f}\n")
+        f.write("=" * 60 + "\n")
+
+    log_print(f"통합 결과 텍스트 저장: {final_txt_path}")
+
     log_print("\n" + "=" * 60)
     log_print("테스트 완료!")
     log_print(f"종료 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log_print(f"결과 파일: {result_file}")
+    log_print(f"결과 파일 (CSV): {result_file}")
+    log_print(f"결과 파일 (TXT): {final_txt_path}")
     log_print(f"시각화 파일: {visualization_file}")
+    log_print(f"속도 벤치마크 파일: {speed_json_path}")
     log_print("=" * 60)
 
 
