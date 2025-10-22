@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-MPM MobileNetV2 Lightweight Optimized 모델 (TensorRT 최적화 버전)
+MPM MobileNetV2 Lightweight Optimized 모델 (Self-Attention 제거 버전)
 - 96×96 Grayscale 입력 (1채널)
 - Custom MobileNetV2(0.5) Backbone (torchvision 독립)
-- Lightweight CBAM (reduction_ratio=16, kernel_size=5)
-- Self-Attention 제거 (단순 FC로 대체)
-- 경량화된 좌표 예측 헤드 (128→32→bins)
-- 메모리 캐싱 Dataset (96×96 Grayscale 이미지 사전 로드)
-- TensorRT INT8 최적화 ONNX 래퍼
+- CBAM Attention (Channel + Spatial)
+- Self-Attention 제거 (단순 FC 처리)
+- Classification-based Coordinate Prediction (32 bins)
 - 210.learning_new.py 호환
 """
 
@@ -47,9 +45,9 @@ GRID_SIZE = 7
 USE_AUTOENCODER = False
 ENCODER_PATH = None
 ENCODER_LATENT_DIM = 0
-SAVE_FILE_NAME = f'mpm_130_lightweight_optim_{IMAGE_SIZE[0]}'
+SAVE_FILE_NAME = f'mpm_130_mobilenet_lightweight_optim_{IMAGE_SIZE[0]}'
 
-# 모델 설정 (더욱 경량화)
+# 모델 설정 (경량화)
 COORD_BINS = 32  # 64 → 32 bins (경량화)
 GAUSSIAN_SIGMA = 1.5
 EMBED_DIM = 128
@@ -217,19 +215,20 @@ class CustomMobileNetV2Backbone(nn.Module):
 
 
 # ============================================
-# Lightweight CBAM Attention Modules
+# CBAM Attention Modules
 # ============================================
 
-class LightweightChannelAttention(nn.Module):
-    """Lightweight Channel Attention Module (reduction_ratio=16)"""
+class ChannelAttention(nn.Module):
+    """Channel Attention Module (ONNX compatible)"""
 
-    def __init__(self, in_channels: int, reduction_ratio: int = 16):
+    def __init__(self, in_channels: int, reduction_ratio: int = 8):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
 
         self.fc = nn.Sequential(
             nn.Linear(in_channels, in_channels // reduction_ratio),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(in_channels // reduction_ratio, in_channels)
         )
         self.sigmoid = nn.Sigmoid()
@@ -254,10 +253,10 @@ class LightweightChannelAttention(nn.Module):
         return x * attention
 
 
-class LightweightSpatialAttention(nn.Module):
-    """Lightweight Spatial Attention Module (kernel_size=5)"""
+class SpatialAttention(nn.Module):
+    """Spatial Attention Module (ONNX compatible)"""
 
-    def __init__(self, kernel_size: int = 5):
+    def __init__(self, kernel_size: int = 7):
         super().__init__()
         self.conv = nn.Conv2d(1, 1, kernel_size=kernel_size, padding=kernel_size // 2)
         self.sigmoid = nn.Sigmoid()
@@ -277,13 +276,13 @@ class LightweightSpatialAttention(nn.Module):
         return x * attention
 
 
-class LightweightCBAM(nn.Module):
-    """Lightweight CBAM: reduction_ratio=16, kernel_size=5"""
+class CBAMModule(nn.Module):
+    """CBAM: Channel + Spatial Attention"""
 
-    def __init__(self, in_channels: int, reduction_ratio: int = 16, kernel_size: int = 5):
+    def __init__(self, in_channels: int, reduction_ratio: int = 8, kernel_size: int = 7):
         super().__init__()
-        self.channel_attention = LightweightChannelAttention(in_channels, reduction_ratio)
-        self.spatial_attention = LightweightSpatialAttention(kernel_size)
+        self.channel_attention = ChannelAttention(in_channels, reduction_ratio)
+        self.spatial_attention = SpatialAttention(kernel_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.channel_attention(x)
@@ -292,11 +291,11 @@ class LightweightCBAM(nn.Module):
 
 
 # ============================================
-# Feature Processor (Self-Attention 대체)
+# Feature Compression
 # ============================================
 
-class OptimizedFeatureProcessor(nn.Module):
-    """Self-Attention 제거 - 단순 FC 레이어로 대체"""
+class FeatureCompression(nn.Module):
+    """Global Pooling + FC for feature compression"""
 
     def __init__(self, in_channels: int, out_dim: int):
         super().__init__()
@@ -304,9 +303,8 @@ class OptimizedFeatureProcessor(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(in_channels, 256),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, out_dim),
-            nn.ReLU()
+            nn.Dropout(0.2),
+            nn.Linear(256, out_dim)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -323,11 +321,11 @@ class OptimizedFeatureProcessor(nn.Module):
 
 
 # ============================================
-# Optimized Coordinate Classification Head
+# Coordinate Classification Head
 # ============================================
 
-class OptimizedCoordinateHead(nn.Module):
-    """경량화된 좌표 예측 헤드 (128→32→bins)"""
+class CoordinateClassificationHead(nn.Module):
+    """분류 기반 좌표 예측 헤드 (32 bins)"""
 
     def __init__(self, input_dim: int, num_bins: int,
                  coord_min: float, coord_max: float, sigma: float = 1.5):
@@ -341,11 +339,12 @@ class OptimizedCoordinateHead(nn.Module):
         bin_centers = torch.linspace(coord_min, coord_max, num_bins)
         self.register_buffer('bin_centers', bin_centers)
 
-        # Classifier (경량화: 128→32→bins)
+        # Classifier (경량화)
         self.classifier = nn.Sequential(
-            nn.Linear(input_dim, 32),
+            nn.Linear(input_dim, input_dim // 2),
             nn.ReLU(),
-            nn.Linear(32, num_bins)
+            nn.Dropout(0.1),
+            nn.Linear(input_dim // 2, num_bins)
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -379,8 +378,8 @@ class OptimizedCoordinateHead(nn.Module):
 # Main Model
 # ============================================
 
-class MPMMobileNetOptimizedModel(nn.Module):
-    """MobileNetV2 Optimized 모델 - Grayscale → 좌표 예측"""
+class MPMMobileNetLightweightModel(nn.Module):
+    """MobileNetV2 Lightweight Optimized 모델 - Grayscale → 좌표 예측"""
     MODEL_NAME = "mpm_mobilenet_lightweight_optim"
 
     def __init__(self, config: Dict):
@@ -403,30 +402,29 @@ class MPMMobileNetOptimizedModel(nn.Module):
         self.backbone = CustomMobileNetV2Backbone(width_mult=0.5)
         backbone_channels = self.backbone.out_channels  # 640
 
-        # Stage 2: Lightweight CBAM Attention
-        self.cbam = LightweightCBAM(
+        # Stage 2: CBAM Attention
+        self.cbam = CBAMModule(
             in_channels=backbone_channels,
-            reduction_ratio=16,  # 8 → 16 (경량화)
-            kernel_size=5  # 7 → 5 (경량화)
+            reduction_ratio=8
         )
 
-        # Stage 3: Feature Processor (Self-Attention 대체)
-        self.feature_processor = OptimizedFeatureProcessor(
+        # Stage 3: Feature Compression
+        self.compression = FeatureCompression(
             in_channels=backbone_channels,
             out_dim=self.embed_dim
         )
 
-        # Stage 4: Coordinate Heads (8개, 경량화)
+        # Stage 4: Coordinate Heads (8개)
         self.coordinate_heads = nn.ModuleList()
         for i in range(self.num_coordinates):
             if i % 2 == 0:  # x
-                head = OptimizedCoordinateHead(
+                head = CoordinateClassificationHead(
                     self.embed_dim, self.coord_bins,
                     self.x_range[0], self.x_range[1],
                     self.gaussian_sigma
                 )
             else:  # y
-                head = OptimizedCoordinateHead(
+                head = CoordinateClassificationHead(
                     self.embed_dim, self.coord_bins,
                     self.y_range[0], self.y_range[1],
                     self.gaussian_sigma
@@ -449,8 +447,8 @@ class MPMMobileNetOptimizedModel(nn.Module):
         # Stage 2: CBAM Attention
         features = self.cbam(features)  # [B, 640, 3, 3]
 
-        # Stage 3: Feature Processing (Self-Attention 대체)
-        enhanced = self.feature_processor(features)  # [B, 128]
+        # Stage 3: Compression (Self-Attention 제거됨)
+        enhanced = self.compression(features)  # [B, 128]
 
         # Stage 4: Coordinate Prediction
         all_logits = []
@@ -525,13 +523,13 @@ class MPMMobileNetOptimizedModel(nn.Module):
 
 
 # ============================================
-# TensorRT Optimized ONNX Wrapper
+# ONNX Wrapper
 # ============================================
 
-class TensorRTOptimizedONNX(nn.Module):
-    """TensorRT INT8 최적화용 ONNX 래퍼 - 좌표만 반환"""
+class MPMMobileNetLightweightModelONNX(nn.Module):
+    """ONNX 변환용 래퍼 - 좌표만 반환"""
 
-    def __init__(self, model: MPMMobileNetOptimizedModel):
+    def __init__(self, model: MPMMobileNetLightweightModel):
         super().__init__()
         self.model = model
 
@@ -541,75 +539,12 @@ class TensorRTOptimizedONNX(nn.Module):
         return output['coordinates']  # [B, 8]
 
 
-def export_tensorrt_optimized_onnx(model: MPMMobileNetOptimizedModel,
-                                    onnx_path: str,
-                                    input_shape: Tuple[int, int, int, int] = (1, 1, 96, 96),
-                                    opset_version: int = 14,
-                                    dynamic_batch: bool = True):
-    """
-    TensorRT INT8 최적화를 위한 ONNX 모델 변환
-
-    Args:
-        model: MPMMobileNetOptimizedModel 인스턴스
-        onnx_path: ONNX 파일 저장 경로
-        input_shape: 입력 shape (B, C, H, W)
-        opset_version: ONNX opset 버전
-        dynamic_batch: 동적 배치 크기 지원 여부
-    """
-    model.eval()
-
-    # ONNX 래퍼로 감싸기
-    onnx_model = TensorRTOptimizedONNX(model)
-    onnx_model.eval()
-
-    # 더미 입력
-    dummy_input = torch.randn(*input_shape)
-
-    # 동적 축 설정
-    dynamic_axes = None
-    if dynamic_batch:
-        dynamic_axes = {
-            'input': {0: 'batch_size'},
-            'output': {0: 'batch_size'}
-        }
-
-    # ONNX 변환
-    torch.onnx.export(
-        onnx_model,
-        dummy_input,
-        onnx_path,
-        export_params=True,
-        opset_version=opset_version,
-        do_constant_folding=True,
-        input_names=['input'],
-        output_names=['output'],
-        dynamic_axes=dynamic_axes,
-        verbose=False
-    )
-
-    print(f"✓ ONNX 모델 저장 완료: {onnx_path}")
-
-    # ONNX 모델 검증
-    try:
-        import onnx
-        onnx_model_check = onnx.load(onnx_path)
-        onnx.checker.check_model(onnx_model_check)
-        print(f"✓ ONNX 모델 검증 완료 (Opset {opset_version})")
-
-        # 파일 크기
-        file_size = Path(onnx_path).stat().st_size / (1024 * 1024)
-        print(f"✓ ONNX 파일 크기: {file_size:.2f} MB")
-
-    except ImportError:
-        print("⚠ onnx 패키지가 설치되지 않아 검증을 건너뜁니다.")
-
-
 # ============================================
-# Memory-Cached Dataset (Grayscale 이미지 메모리 캐싱)
+# Dataset (Grayscale 이미지 기반)
 # ============================================
 
 class DataSet(Dataset):
-    """메모리 캐싱 Grayscale 데이터셋 - 모든 이미지를 메모리에 사전 로드"""
+    """Grayscale 이미지 기반 데이터셋"""
 
     def __init__(self,
                  source_folder: str,
@@ -655,41 +590,15 @@ class DataSet(Dataset):
         self.coord_max_y = 224
 
         # Grayscale normalization (통계 기반)
+        # 일반적인 Grayscale 이미지 통계값 사용
         self.mean = torch.tensor([0.449]).view(1, 1, 1)
         self.std = torch.tensor([0.226]).view(1, 1, 1)
 
-        # 데이터 로드 (메타데이터)
+        # 데이터 로드
         self.data = []
         self.load_data(labels_file)
 
         print(f"{mode.upper()} 데이터셋: {len(self.data)}개 샘플 (증강 전)")
-
-        # ★ 메모리 캐싱: 모든 이미지를 96×96 Grayscale Tensor로 사전 변환
-        print(f"메모리 캐싱 시작: {len(self.data)}개 이미지를 96×96 Grayscale Tensor로 변환 중...")
-        self.cached_images = []
-
-        for sample in tqdm(self.data, desc=f"{mode.upper()} 이미지 캐싱"):
-            image_path = os.path.join(self.source_folder, sample['filename'])
-            orig_image = cv2.imread(image_path)
-
-            if orig_image is None:
-                # 이미지 로드 실패 시 빈 이미지
-                cached_tensor = torch.zeros(1, *self.image_size)
-            else:
-                # 리사이즈
-                image_resized = cv2.resize(orig_image, self.image_size,
-                                          interpolation=cv2.INTER_LINEAR)
-
-                # BGR → Grayscale → Tensor
-                image_gray = cv2.cvtColor(image_resized, cv2.COLOR_BGR2GRAY)
-                image_tensor = torch.FloatTensor(image_gray).unsqueeze(0) / 255.0
-
-                # Normalization
-                cached_tensor = (image_tensor - self.mean) / self.std
-
-            self.cached_images.append(cached_tensor)
-
-        print(f"✓ 메모리 캐싱 완료: {len(self.cached_images)}개 이미지")
 
     def load_data(self, labels_file: str):
         """레이블 파일 로드"""
@@ -759,6 +668,19 @@ class DataSet(Dataset):
         y = norm_y * (self.coord_max_y - self.coord_min_y) + self.coord_min_y
         return x, y
 
+    def preprocess_image(self, image: np.ndarray) -> torch.Tensor:
+        """이미지 전처리 (BGR → Grayscale → Normalize)"""
+        # BGR → Grayscale
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # [0, 255] → [0, 1]
+        image_tensor = torch.FloatTensor(image_gray).unsqueeze(0) / 255.0
+
+        # Normalization
+        image_tensor = (image_tensor - self.mean) / self.std
+
+        return image_tensor
+
     def __len__(self):
         base_len = len(self.data)
         if self.mode == 'train' and self.augment:
@@ -775,9 +697,12 @@ class DataSet(Dataset):
             is_augmented = False
 
         sample = self.data[base_idx]
+        image_path = os.path.join(self.source_folder, sample['filename'])
+        orig_image = cv2.imread(image_path)
 
-        # ★ 메모리에서 이미지 가져오기 (디스크 I/O 제거)
-        image_tensor = self.cached_images[base_idx].clone()
+        if orig_image is None:
+            print(f"Warning: 이미지 로드 실패 - {image_path}")
+            orig_image = np.zeros((*self.image_size, 3), dtype=np.uint8)
 
         coords_orig = {
             'center_x': sample['center_x'],
@@ -790,28 +715,13 @@ class DataSet(Dataset):
             'side_y': sample['side_y']
         }
 
-        # 증강 적용 (크롭만 - 이미지는 이미 96×96 Grayscale)
+        # 증강 적용
         if is_augmented and self.crop_enabled:
-            # 크롭을 위해 임시로 denormalize 후 재처리
-            # 주의: 증강은 원본 이미지에서 수행해야 하므로,
-            # 현재 구현에서는 증강 시에만 디스크에서 다시 로드
-            image_path = os.path.join(self.source_folder, sample['filename'])
-            orig_image = cv2.imread(image_path)
-
-            if orig_image is not None:
-                image_resized, coords_resized = apply_crop_augmentation(
-                    orig_image, coords_orig, self.image_size, self.crop_config
-                )
-
-                # BGR → Grayscale → Tensor
-                image_gray = cv2.cvtColor(image_resized, cv2.COLOR_BGR2GRAY)
-                image_tensor = torch.FloatTensor(image_gray).unsqueeze(0) / 255.0
-                image_tensor = (image_tensor - self.mean) / self.std
-            else:
-                # 실패 시 캐시된 이미지 사용
-                coords_resized = coords_orig
+            image_resized, coords_resized = apply_crop_augmentation(
+                orig_image, coords_orig, self.image_size, self.crop_config
+            )
         else:
-            # 리사이즈된 좌표 계산
+            # 리사이즈만
             labels = [
                 [coords_orig['center_x'], coords_orig['center_y']],
                 [coords_orig['floor_x'], coords_orig['floor_y']],
@@ -819,18 +729,17 @@ class DataSet(Dataset):
                 [coords_orig['side_x'], coords_orig['side_y']]
             ]
 
-            # 좌표만 리사이즈 (이미지는 이미 캐시됨)
-            # resize_image_with_coordinates의 좌표 변환 로직만 사용
-            _, adjusted_labels = resize_image_with_coordinates(
-                self.image_size[0],
-                np.zeros((*self.image_size, 3), dtype=np.uint8),  # 더미 이미지
-                labels
+            image_resized, adjusted_labels = resize_image_with_coordinates(
+                self.image_size[0], orig_image, labels
             )
 
             coords_resized = {}
             for i, key in enumerate(['center', 'floor', 'front', 'side']):
                 coords_resized[f'{key}_x'] = adjusted_labels[i][0]
                 coords_resized[f'{key}_y'] = adjusted_labels[i][1]
+
+        # 이미지 전처리 (Grayscale)
+        image_tensor = self.preprocess_image(image_resized)
 
         # 좌표 정규화
         targets = []
@@ -873,7 +782,7 @@ class PointDetector:
             'loss_alpha': 0.7
         }
 
-        self.model = MPMMobileNetOptimizedModel(model_config)
+        self.model = MPMMobileNetLightweightModel(model_config)
         self.model.to(device)
 
         # 정규화 파라미터 (사용 안함)
@@ -929,10 +838,8 @@ PointDetectorDataSet = DataSet
 
 
 if __name__ == "__main__":
-    print("MPM MobileNetV2 Optimized 모델 정의 완료")
+    print("MPM MobileNetV2 Lightweight Optimized 모델 정의 완료")
     print(f"입력: Grayscale 96×96 이미지 (1채널)")
-    print(f"아키텍처: Custom MobileNetV2(0.5) + Lightweight CBAM + Optimized FC")
-    print(f"최적화: Self-Attention 제거, 경량화된 헤드 (128→32→bins)")
-    print(f"Dataset: 메모리 캐싱 (96×96 Grayscale Tensor 사전 로드)")
-    print(f"ONNX: TensorRT INT8 최적화 래퍼 제공")
-    print(f"예상 파라미터: ~500K params (~2.0MB)")
+    print(f"아키텍처: Custom MobileNetV2(0.5) + CBAM (Self-Attention 제거)")
+    print(f"출력: 8개 좌표 (Classification-based, 32 bins)")
+    print(f"최적화: Self-Attention 제거로 파라미터 감소")
