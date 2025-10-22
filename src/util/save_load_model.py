@@ -12,6 +12,28 @@ from typing import Optional, Dict, Any, Tuple, Callable
 import glob
 import re
 import traceback
+import yaml
+
+
+def get_model_path_from_config() -> Optional[Path]:
+    """
+    config.yml에서 현재 사용 중인 모델 경로를 가져옴
+    
+    Returns:
+        모델 파일의 Path 객체, 설정을 읽을 수 없으면 None
+    """
+    try:
+        config_path = Path(__file__).parent.parent / "config.yml"
+        if config_path.exists():
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            
+            model_source = config.get('learning_model', {}).get('source')
+            if model_source:
+                return Path(__file__).parent.parent / model_source
+    except Exception:
+        pass
+    return None
 
 
 def save_model(
@@ -177,25 +199,21 @@ def save_model_as_onnx(
             # MobileNet 모델: get_input_dim() 함수로부터 입력 차원 가져오기
             try:
                 import importlib.util
-                # 모델 소스 파일 경로 찾기
-                possible_paths = [
-                    Path(__file__).parent.parent / "model_defs" / "110.mpm_mobilenet_lightweight.py",
-                ]
-
+                # 모델 소스 파일 경로 찾기 - config.yml에서 가져오기
+                model_path = get_model_path_from_config()
+                
                 input_shape = None
-                for model_path in possible_paths:
-                    if model_path.exists():
-                        try:
-                            spec = importlib.util.spec_from_file_location("mobilenet_model_temp", str(model_path))
-                            mobilenet_module = importlib.util.module_from_spec(spec)
-                            spec.loader.exec_module(mobilenet_module)
+                if model_path and model_path.exists():
+                    try:
+                        spec = importlib.util.spec_from_file_location("mobilenet_model_temp", str(model_path))
+                        mobilenet_module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(mobilenet_module)
 
-                            if hasattr(mobilenet_module, 'get_input_dim'):
-                                input_shape = mobilenet_module.get_input_dim()
-                                log_func(f"ONNX 변환: MobileNet 모델 감지 ({model_path.name}), 입력 shape={input_shape}")
-                                break
-                        except Exception:
-                            continue
+                        if hasattr(mobilenet_module, 'get_input_dim'):
+                            input_shape = mobilenet_module.get_input_dim()
+                            log_func(f"ONNX 변환: MobileNet 모델 감지 ({model_path.name}), 입력 shape={input_shape}")
+                    except Exception:
+                        pass
 
                 if input_shape is None:
                     # fallback
@@ -282,29 +300,26 @@ def save_model_as_onnx(
                         # MobileNet 모델 전용 래퍼 시도
                         try:
                             import importlib.util
-                            possible_wrapper_paths = [
-                                Path(__file__).parent.parent / "model_defs" / "110.mpm_mobilenet_lightweight.py",
-                            ]
-
+                            # config.yml에서 현재 모델 경로 가져오기
+                            wrapper_path = get_model_path_from_config()
+                            
                             wrapper_loaded = False
-                            for wrapper_path in possible_wrapper_paths:
-                                if wrapper_path.exists():
-                                    try:
-                                        spec = importlib.util.spec_from_file_location(
-                                            "mobilenet_model_wrapper",
-                                            str(wrapper_path)
-                                        )
-                                        mobilenet_module = importlib.util.module_from_spec(spec)
-                                        spec.loader.exec_module(mobilenet_module)
+                            if wrapper_path and wrapper_path.exists():
+                                try:
+                                    spec = importlib.util.spec_from_file_location(
+                                        "mobilenet_model_wrapper",
+                                        str(wrapper_path)
+                                    )
+                                    mobilenet_module = importlib.util.module_from_spec(spec)
+                                    spec.loader.exec_module(mobilenet_module)
 
-                                        if hasattr(mobilenet_module, 'MPMMobileNetLightweightModelONNX'):
-                                            MPMMobileNetLightweightModelONNX = mobilenet_module.MPMMobileNetLightweightModelONNX
-                                            export_model = MPMMobileNetLightweightModelONNX(model)
-                                            log_func(f"ONNX 변환: MPMMobileNetLightweightModelONNX 래퍼 사용 ({wrapper_path.name})")
-                                            wrapper_loaded = True
-                                            break
-                                    except Exception:
-                                        continue
+                                    if hasattr(mobilenet_module, 'MPMMobileNetLightweightModelONNX'):
+                                        MPMMobileNetLightweightModelONNX = mobilenet_module.MPMMobileNetLightweightModelONNX
+                                        export_model = MPMMobileNetLightweightModelONNX(model)
+                                        log_func(f"ONNX 변환: MPMMobileNetLightweightModelONNX 래퍼 사용 ({wrapper_path.name})")
+                                        wrapper_loaded = True
+                                except Exception:
+                                    pass
 
                             if not wrapper_loaded:
                                 raise ImportError("MPMMobileNetLightweightModelONNX를 찾을 수 없음")
@@ -349,7 +364,7 @@ def save_model_as_onnx(
                     dummy_input,
                     str(onnx_path),
                     export_params=True,
-                    opset_version=18,
+                    opset_version=11,  # 18 -> 11로 변경 (ReduceMean axes 호환성)
                     do_constant_folding=True,
                     input_names=input_names,
                     output_names=['coordinates'],
@@ -368,12 +383,7 @@ def save_model_as_onnx(
 
             # 모든 데이터를 하나의 파일에 저장
             onnx.save(onnx_model, str(onnx_path))
-
-            # .onnx.data 파일이 생성되었다면 삭제
-            data_file = Path(str(onnx_path) + '.data')
-            if data_file.exists():
-                data_file.unlink()
-                log_func(f"ONNX 변환: 단일 파일로 통합 완료 (external data 제거)")
+            log_func(f"ONNX 변환: 단일 파일로 통합 완료")
         except Exception as e:
             log_func(f"ONNX 단일 파일 변환 경고: {e}")
 
