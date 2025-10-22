@@ -45,7 +45,7 @@ GRID_SIZE = 7
 USE_AUTOENCODER = False
 ENCODER_PATH = None
 ENCODER_LATENT_DIM = 0
-SAVE_FILE_NAME = f'mpm_130_mobilenet_lightweight_optim_{IMAGE_SIZE[0]}'
+SAVE_FILE_NAME = f'mpm_lightweight_optim_{IMAGE_SIZE[0]}'
 
 # 모델 설정 (경량화)
 COORD_BINS = 32  # 64 → 32 bins (경량화)

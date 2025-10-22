@@ -54,7 +54,10 @@
       "Bash(kill:*)",
       "Bash(PYTHONDONTWRITEBYTECODE=1 timeout 300 python3:*)",
       "Bash(PYTHONUNBUFFERED=1 timeout 25 python3:*)",
-      "Bash(pip3 list:*)"
+      "Bash(pip3 list:*)",
+      "Bash(zip -r a.zip CLAUDE.md README.md data model requirements.txt src)",
+      "Bash(pip3 show:*)",
+      "Bash(PYTHONUNBUFFERED=1 timeout 30 python3:*)"
     ],
     "deny": [],
     "ask": []
