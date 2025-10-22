@@ -361,6 +361,22 @@ def save_model_as_onnx(
                     verbose=False
                 )
 
+        # external data 형식으로 저장된 경우, 단일 파일로 변환
+        try:
+            import onnx
+            onnx_model = onnx.load(str(onnx_path))
+
+            # 모든 데이터를 하나의 파일에 저장
+            onnx.save(onnx_model, str(onnx_path))
+
+            # .onnx.data 파일이 생성되었다면 삭제
+            data_file = Path(str(onnx_path) + '.data')
+            if data_file.exists():
+                data_file.unlink()
+                log_func(f"ONNX 변환: 단일 파일로 통합 완료 (external data 제거)")
+        except Exception as e:
+            log_func(f"ONNX 단일 파일 변환 경고: {e}")
+
         # 모델을 원래 디바이스로 복원
         model = model.to(original_device)
         model.train()
