@@ -4,8 +4,8 @@
 199.verify_learning_data.py
 학습 데이터 검증 도구
 
-data/learning 폴더의 labels.txt를 읽어서
-랜덤하게 40개의 이미지를 선택하고 floor 위치를 시각화합니다.
+config.yml의 source_folder 설정을 사용하여
+labels.txt를 읽고 랜덤하게 40개의 이미지를 선택하고 floor 위치를 시각화합니다.
 """
 
 import os
@@ -15,13 +15,30 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
+import yaml
 
 # 프로젝트 루트 디렉토리 설정
 ROOT_DIR = Path(__file__).parent.parent
 
-def load_labels_data():
+def load_config():
+    """config.yml 파일을 로드합니다."""
+    config_path = Path(__file__).parent / 'config.yml'
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+def load_labels_data(config):
     """labels.txt 파일을 읽어 데이터를 로드합니다."""
-    labels_file = ROOT_DIR / "data" / "learning" / "labels.txt"
+    # config.yml에서 source_folder와 labels_file 읽기
+    source_folder = config['data']['source_folder']
+    labels_filename = config['data']['labels_file']
+
+    # 상대 경로 처리
+    base_dir = Path(__file__).parent
+    data_path = (base_dir / source_folder).resolve()
+    labels_file = data_path / labels_filename
+
+    print(f"데이터 폴더: {data_path}")
+    print(f"라벨 파일: {labels_file}")
 
     if not labels_file.exists():
         print(f"오류: {labels_file} 파일이 존재하지 않습니다.")
@@ -50,16 +67,15 @@ def load_labels_data():
                 }
                 data.append(entry)
 
-    return data
+    return data, data_path
 
-def verify_and_visualize_data(data, num_samples=40):
+def verify_and_visualize_data(data, data_path, num_samples=40):
     """랜덤하게 샘플을 선택하고 floor 위치를 시각화합니다."""
     # 이미지가 존재하는 데이터만 필터링
     valid_data = []
-    learning_dir = ROOT_DIR / "data" / "learning"
 
     for entry in data:
-        img_path = learning_dir / entry['filename']
+        img_path = data_path / entry['filename']
         if img_path.exists():
             valid_data.append(entry)
 
@@ -93,7 +109,7 @@ def verify_and_visualize_data(data, num_samples=40):
         ax = axes[row, col]
 
         # 이미지 로드
-        img_path = learning_dir / entry['filename']
+        img_path = data_path / entry['filename']
         img = cv2.imread(str(img_path))
 
         if img is not None:
@@ -157,12 +173,16 @@ def main():
     # 랜덤 시드 설정 (재현 가능한 결과를 위해)
     random.seed(42)
 
+    # config.yml 로드
+    print("config.yml 파일 로드 중...")
+    config = load_config()
+
     # 데이터 로드
     print("labels.txt 파일 로드 중...")
-    data = load_labels_data()
+    data, data_path = load_labels_data(config)
 
     # 시각화 및 검증
-    verify_and_visualize_data(data, num_samples=40)
+    verify_and_visualize_data(data, data_path, num_samples=40)
 
     print("\n프로그램 완료!")
 
