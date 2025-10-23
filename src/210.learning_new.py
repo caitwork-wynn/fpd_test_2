@@ -877,6 +877,7 @@ def main():
             torch.save(checkpoint, str(checkpoint_path))
 
             # Best 모델 정보를 결과 디렉토리에도 기록 (상세 오차 정보 포함)
+            result_dir.mkdir(parents=True, exist_ok=True)  # 디렉토리 재확인
             best_info_path = result_dir / f"best_epoch_{epoch}.json"
 
             # 상세 오차 정보 계산

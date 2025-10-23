@@ -268,8 +268,10 @@ class SpatialAttention(nn.Module):
         Returns:
             attention: [B, C, H, W]
         """
-        # Channel-wise average pooling
-        avg_pool = torch.mean(x, dim=1, keepdim=True)  # [B, 1, H, W]
+        # Channel-wise average pooling (ONNX opset 11 compatible)
+        # torch.mean with dim parameter causes issues in opset 11
+        # Use sum + division instead
+        avg_pool = torch.sum(x, dim=1, keepdim=True) / x.size(1)  # [B, 1, H, W]
 
         # Spatial attention
         attention = self.sigmoid(self.conv(avg_pool))  # [B, 1, H, W]

@@ -323,8 +323,8 @@ def main():
     parser.add_argument(
         '--model_path',
         type=str,
-        default='../model/mpm_110_mobilenet_lightweight_96_best.pth',
-        help='테스트할 모델 가중치 파일 경로 (기본값: ../model/mpm_110_mobilenet_lightweight_96_best.pth)'
+        default=None,
+        help='테스트할 모델 가중치 파일 경로 (기본값: config.yml의 모델 설정 기반 자동 결정)'
     )
     parser.add_argument(
         '--model_source',
@@ -334,13 +334,7 @@ def main():
     )
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("범용 다중 포인트 검출 모델 테스트")
-    print("- 동적 모델 로딩")
-    print(f"- 모델 가중치 파일: {args.model_path}")
-    print("=" * 60)
-
-    # 설정 로드
+    # 설정 로드 (모델 경로 결정을 위해 먼저 로드)
     config_path = Path(__file__).parent / 'config.yml'
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
@@ -349,48 +343,55 @@ def main():
     # argument로 model_source가 지정되면 해당 파일 사용, 아니면 config.yml 사용
     if args.model_source:
         model_source = args.model_source
-        print(f"- 모델 소스 (argument): {model_source}")
     else:
         model_source = config['learning_model']['source']
-        print(f"- 모델 소스 (config.yml): {model_source}")
 
-    model_path = (Path(__file__).parent / model_source).resolve()
-
-    print(f"\n모델 정의 로딩: {model_path}")
+    # 모델 정의 파일을 먼저 import하여 save_file_name 가져오기
+    base_dir = Path(__file__).parent
+    model_path = (base_dir / model_source).resolve()
 
     # 모듈 동적 import
+    import importlib.util
     spec = importlib.util.spec_from_file_location("model_module", str(model_path))
     model_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(model_module)
 
-    # 표준 클래스 import
+    # 모델 설정 가져오기 (save_file_name 획득)
+    if hasattr(model_module, 'get_model_config'):
+        model_config = model_module.get_model_config()
+        save_file_name = model_config['save_file_name']
+    else:
+        # get_model_config가 없는 경우 config.yml에서 읽기
+        save_file_name = config.get('learning_model', {}).get('checkpointing', {}).get('save_file_name', 'model')
+
+    # 모델 경로 결정: argument로 지정되지 않은 경우 자동 생성
+    if args.model_path is None:
+        args.model_path = f'../model/{save_file_name}_best.pth'
+
+    print("=" * 60)
+    print("범용 다중 포인트 검출 모델 테스트")
+    print("- 동적 모델 로딩")
+    print(f"- 모델 소스: {model_source}")
+    print(f"- 모델 가중치 파일: {args.model_path}")
+    print("=" * 60)
+
+    print(f"\n모델 정의 로딩: {model_path}")
+    print("모델 클래스 로드 완료")
+
+    # 표준 클래스 import (이미 위에서 모듈 import 완료)
     PointDetectorDataSet = model_module.PointDetectorDataSet
     PointDetector = model_module.PointDetector
     # Autoencoder 버전도 import (존재하는 경우)
     PointDetectorDataSetWithAutoencoder = getattr(model_module, 'PointDetectorDataSetWithAutoencoder', None)
 
-    print("모델 클래스 로드 완료")
+    # 모델 설정 가져오기 (이미 위에서 로드 완료)
+    target_points = model_config.get('target_points', None) if hasattr(model_module, 'get_model_config') else config.get('learning_model', {}).get('target_points', None)
+    use_fpd_architecture = model_config.get('use_fpd_architecture', False) if hasattr(model_module, 'get_model_config') else config.get('learning_model', {}).get('architecture', {}).get('use_fpd_architecture', False)
+    features_config = model_config.get('features', {'image_size': [112, 112], 'grid_size': 7}) if hasattr(model_module, 'get_model_config') else config.get('learning_model', {}).get('architecture', {}).get('features', {'image_size': [112, 112], 'grid_size': 7})
 
-    # 모델 설정 가져오기 (get_model_config 함수가 있는 경우)
-    if hasattr(model_module, 'get_model_config'):
-        model_config = model_module.get_model_config()
-        save_file_name = model_config['save_file_name']
-        target_points = model_config['target_points']
-        use_fpd_architecture = model_config['use_fpd_architecture']
-        features_config = model_config['features']
-        print(f"모델 설정 로드: {save_file_name}")
-        print(f"타겟 포인트: {target_points}")
-        print(f"FPD 아키텍처: {use_fpd_architecture}")
-    else:
-        # get_model_config가 없는 경우 config.yml에서 읽기 (하위 호환성)
-        save_file_name = config.get('learning_model', {}).get('checkpointing', {}).get('save_file_name', 'model')
-        target_points = config.get('learning_model', {}).get('target_points', None)
-        use_fpd_architecture = config.get('learning_model', {}).get('architecture', {}).get('use_fpd_architecture', False)
-        features_config = config.get('learning_model', {}).get('architecture', {}).get('features', {
-            'image_size': [112, 112],
-            'grid_size': 7
-        })
-        print(f"모델 설정 로드 (config.yml): {save_file_name}")
+    print(f"모델 설정 로드: {save_file_name}")
+    print(f"타겟 포인트: {target_points}")
+    print(f"FPD 아키텍처: {use_fpd_architecture}")
 
     # 경로 설정
     base_dir = Path(__file__).parent

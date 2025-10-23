@@ -364,7 +364,7 @@ def save_model_as_onnx(
                     dummy_input,
                     str(onnx_path),
                     export_params=True,
-                    opset_version=11,  # 18 -> 11로 변경 (ReduceMean axes 호환성)
+                    opset_version=18,  # PyTorch 권장 버전, ReduceMean 호환성
                     do_constant_folding=True,
                     input_names=input_names,
                     output_names=['coordinates'],

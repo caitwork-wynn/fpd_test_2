@@ -9,7 +9,7 @@ learning_model:
     
 # 데이터
 data:
-  source_folder: "../data/learning"  # 학습 데이터 경로
+  source_folder: "../data/learning_lc"  # 학습 데이터 경로
   labels_file: "labels.txt"  # 레이블 파일명
   test_id_suffix: '1'
   validation_ratio: 0.2
@@ -28,7 +28,7 @@ training:
 
   # 데이터 증강
   augmentation:
-    enabled: true
+    enabled: false
     augment_count: 4  # 원본 데이터당 증강 샘플 수
     # 크롭 증강 설정
     crop:
