@@ -611,6 +611,7 @@ class DataSet(Dataset):
 
         all_train_data = []
         test_data = []
+        skipped_count = 0
 
         for idx, line in enumerate(lines[1:], 1):
             line = line.strip()
@@ -624,17 +625,25 @@ class DataSet(Dataset):
             data_id = parts[0]
             filename = parts[2]
 
+            # 이미지 파일 존재 여부 확인
+            image_path = os.path.join(self.source_folder, filename)
+            if not os.path.exists(image_path):
+                if skipped_count < 10:  # 처음 10개만 경고 출력
+                    print(f"  경고: 이미지 파일 없음 - {filename}")
+                skipped_count += 1
+                continue
+
             sample = {
                 'id': data_id,
                 'filename': filename,
                 'center_x': int(parts[3]),
                 'center_y': int(parts[4]),
-                'floor_x': int(parts[5]) if parts[5] != '0' else int(parts[3]),
-                'floor_y': int(parts[6]) if parts[6] != '0' else int(parts[4]),
-                'front_x': int(parts[7]) if parts[7] != '0' else int(parts[3]),
-                'front_y': int(parts[8]) if parts[8] != '0' else int(parts[4]),
-                'side_x': int(parts[9]) if parts[9] != '0' else int(parts[3]),
-                'side_y': int(parts[10]) if parts[10] != '0' else int(parts[4])
+                'floor_x': int(parts[5]) if parts[5] and parts[5] != '0' else int(parts[3]),
+                'floor_y': int(parts[6]) if parts[6] and parts[6] != '0' else int(parts[4]),
+                'front_x': int(parts[7]) if parts[7] and parts[7] != '0' else int(parts[3]),
+                'front_y': int(parts[8]) if parts[8] and parts[8] != '0' else int(parts[4]),
+                'side_x': int(parts[9]) if parts[9] and parts[9] != '0' else int(parts[3]),
+                'side_y': int(parts[10]) if parts[10] and parts[10] != '0' else int(parts[4])
             }
 
             if data_id.endswith(self.test_id_suffix):
@@ -642,6 +651,8 @@ class DataSet(Dataset):
             else:
                 all_train_data.append(sample)
 
+        if skipped_count > 0:
+            print(f"  이미지 없어서 스킵된 레코드: {skipped_count}개")
         print(f"전체 데이터: Train {len(all_train_data)}개, Test {len(test_data)}개")
 
         if self.max_train_images > 0 and self.mode != 'test':

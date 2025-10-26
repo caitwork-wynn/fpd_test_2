@@ -558,22 +558,35 @@ def main():
     best_model_time_loaded = None  # 로드된 시간 정보
 
     try:
-        # 먼저 Best 모델 로드 시도 (Best 파일 우선)
+        # 모델 로드 시도 (우선순위: curr → best → epoch)
         loaded_epoch = load_model(
             model=model,
             optimizer=optimizer,
             save_dir=str(checkpoint_dir),
             model_name=save_file_name,
-            load_best=True,  # best 모델 로드
+            load_best=True,
             device=device
         )
 
-        if loaded_epoch == -1:  # best 모델
-            log_print("Best 모델에서 학습 재개")
-            # best 모델에서 재개할 때는 실제 epoch 정보를 체크포인트에서 읽어야 함
-            best_checkpoint_path = checkpoint_dir / f"{save_file_name}_best.pth"
-            checkpoint = torch.load(str(best_checkpoint_path), map_location=device, weights_only=False)
-            start_epoch = checkpoint.get('epoch', 0)
+        # 로드된 체크포인트에서 추가 정보 복원
+        # curr, best, epoch 파일 순서대로 확인
+        checkpoint = None
+        for suffix in ['_curr.pth', '_best.pth']:
+            checkpoint_path = checkpoint_dir / f"{save_file_name}{suffix}"
+            if checkpoint_path.exists():
+                checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+                break
+
+        # epoch 파일도 확인 (curr, best 없는 경우)
+        if checkpoint is None and loaded_epoch > 0:
+            epoch_dir = checkpoint_dir / save_file_name
+            epoch_checkpoint_path = epoch_dir / f"{save_file_name}_epoch{loaded_epoch}.pth"
+            if epoch_checkpoint_path.exists():
+                checkpoint = torch.load(str(epoch_checkpoint_path), map_location=device, weights_only=False)
+
+        # 체크포인트에서 정보 복원
+        if checkpoint:
+            start_epoch = checkpoint.get('epoch', loaded_epoch if loaded_epoch > 0 else 0)
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             best_model_time_loaded = checkpoint.get('best_model_time', None)
 
@@ -581,45 +594,16 @@ def main():
             if 'feature_mean' in checkpoint:
                 detector.feature_mean = checkpoint['feature_mean']
                 detector.feature_std = checkpoint['feature_std']
+        else:
+            start_epoch = loaded_epoch if loaded_epoch > 0 else 0
 
         log_print(f"에폭 {start_epoch}부터 학습 재개")
         log_print(f"이전 최고 검증 손실: {best_val_loss:.6f}")
 
     except FileNotFoundError:
-        # Best 파일이 없으면 epoch 파일 로드 시도
-        try:
-            loaded_epoch = load_model(
-                model=model,
-                optimizer=optimizer,
-                save_dir=str(checkpoint_dir),
-                model_name=save_file_name,
-                load_best=False,  # epoch 파일 로드
-                device=device
-            )
-
-            if loaded_epoch > 0:
-                log_print(f"Epoch {loaded_epoch} 모델에서 학습 재개 (Best 파일 없음)")
-                start_epoch = loaded_epoch
-
-                # epoch 파일에서 best_val_loss 정보 복원 시도
-                epoch_checkpoint_path = checkpoint_dir / f"{save_file_name}_epoch{loaded_epoch}.pth"
-                if epoch_checkpoint_path.exists():
-                    checkpoint = torch.load(str(epoch_checkpoint_path), map_location=device, weights_only=False)
-                    best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-                    best_model_time_loaded = checkpoint.get('best_model_time', None)
-
-                    # feature_mean, feature_std 복원 (있는 경우)
-                    if 'feature_mean' in checkpoint:
-                        detector.feature_mean = checkpoint['feature_mean']
-                        detector.feature_std = checkpoint['feature_std']
-
-            log_print(f"에폭 {start_epoch}부터 학습 재개")
-            log_print(f"이전 최고 검증 손실: {best_val_loss:.6f}")
-
-        except FileNotFoundError:
-            # Best 파일도 없고 epoch 파일도 없으면 새로운 학습
-            log_print("새로운 학습 시작")
-            start_epoch = 0
+        # 모든 체크포인트 파일이 없으면 새로운 학습
+        log_print("새로운 학습 시작")
+        start_epoch = 0
 
     # 스케줄러 설정
     scheduler_config = config['training']['scheduler']
@@ -661,6 +645,7 @@ def main():
     early_stopping_patience = config['training']['early_stopping']['patience']
     min_delta = config['training']['early_stopping']['min_delta']
     save_frequency = config['learning_model']['checkpointing']['save_frequency']
+    save_frequency_curr = config['learning_model']['checkpointing'].get('save_frequency_curr', 10)
 
     # 오차 분석 설정
     error_analysis_config = config['training']['error_analysis']
@@ -970,7 +955,38 @@ def main():
                 log_print(f"\nEarly stopping triggered at epoch {epoch}")
                 break
 
-        # 주기적 저장
+        # 주기적 저장 (curr)
+        if epoch % save_frequency_curr == 0:
+            checkpoint_data = {
+                'epoch': epoch,
+                'best_val_loss': best_val_loss,
+                'model_config': config,
+                'best_model_time': best_model_time
+            }
+
+            # feature_mean, feature_std 저장 (있는 경우)
+            if hasattr(detector, 'feature_mean'):
+                checkpoint_data['feature_mean'] = detector.feature_mean
+                checkpoint_data['feature_std'] = detector.feature_std
+
+            checkpoint_path = save_model(
+                model=model,
+                optimizer=optimizer,
+                save_dir=str(checkpoint_dir),
+                model_name=save_file_name,
+                is_best=False,
+                is_curr=True,
+                epoch=epoch,
+                log_func=log_print
+            )
+
+            # 추가 정보 저장
+            checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+            checkpoint.update(checkpoint_data)
+            torch.save(checkpoint, str(checkpoint_path))
+            log_print(f"Current 체크포인트 저장: {checkpoint_path}")
+
+        # 주기적 저장 (epoch)
         if epoch % save_frequency == 0:
             if not config['learning_model']['checkpointing']['save_best_only']:
                 checkpoint_path = save_model(
@@ -982,7 +998,7 @@ def main():
                     epoch=epoch,
                     log_func=log_print
                 )
-                log_print(f"체크포인트 저장: {checkpoint_path}")
+                log_print(f"Epoch 체크포인트 저장: {checkpoint_path}")
 
     # 학습 완료 시간 계산
     total_training_time = time.time() - training_start_time

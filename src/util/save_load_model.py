@@ -44,7 +44,8 @@ def save_model(
     is_best: bool,
     epoch: Optional[int] = None,
     device: Optional[torch.device] = None,
-    log_func: Optional[Callable[[str], None]] = None
+    log_func: Optional[Callable[[str], None]] = None,
+    is_curr: bool = False
 ) -> Path:
     """
     PyTorch 모델과 옵티마이저 상태를 저장
@@ -58,12 +59,13 @@ def save_model(
         epoch: 에폭 번호 (일반 모델일 때 필수)
         device: 디바이스 (ONNX 변환용, best일 때만 사용)
         log_func: 로깅 함수 (선택사항)
+        is_curr: 현재 진행 중인 모델(curr)인지 여부
 
     Returns:
         Path: 저장된 체크포인트 경로
 
     Raises:
-        ValueError: is_best=False일 때 epoch가 None인 경우
+        ValueError: is_best=False이고 is_curr=False일 때 epoch가 None인 경우
     """
     # 로깅 함수가 없으면 print 사용
     if log_func is None:
@@ -76,6 +78,9 @@ def save_model(
     if is_best:
         # best 모델은 기존 경로 유지
         checkpoint_path = save_path / f"{model_name}_best.pth"
+    elif is_curr:
+        # curr 모델 (주기적 저장)
+        checkpoint_path = save_path / f"{model_name}_curr.pth"
     else:
         if epoch is None:
             raise ValueError("일반 모델 저장 시 epoch 번호가 필요합니다.")
@@ -90,8 +95,8 @@ def save_model(
         'optimizer_state_dict': optimizer.state_dict(),
     }
 
-    # 에폭 정보 추가 (일반 모델인 경우)
-    if not is_best and epoch is not None:
+    # 에폭 정보 추가 (일반 모델 또는 curr 모델인 경우)
+    if (not is_best or is_curr) and epoch is not None:
         checkpoint_data['epoch'] = epoch
 
     # 체크포인트 저장
@@ -415,54 +420,65 @@ def load_model(
     device: torch.device = torch.device('cpu')
 ) -> int:
     """
-    저장된 모델 체크포인트 로드
+    저장된 모델 체크포인트 로드 (우선순위: curr → best → epoch)
 
     Args:
         model: PyTorch 모델 객체
         optimizer: 옵티마이저 객체 (Optional)
         save_dir: 저장 폴더 경로
         model_name: 모델명
-        load_best: best 모델 로드 여부 (기본: True)
+        load_best: best 모델 로드 여부 (기본: True, 하지만 curr가 있으면 curr 우선)
         device: 타겟 디바이스
 
     Returns:
-        int: 로드된 에폭 번호 (best 모델인 경우 -1)
+        int: 로드된 에폭 번호 (curr/best 모델인 경우 체크포인트의 epoch 값 또는 -1)
 
     Raises:
-        FileNotFoundError: 체크포인트 파일을 찾을 수 없는 경우
+        FileNotFoundError: 모든 체크포인트 파일을 찾을 수 없는 경우
     """
     save_path = Path(save_dir)
 
-    if load_best:
-        # Best 모델 로드
-        checkpoint_path = save_path / f"{model_name}_best.pth"
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Best 모델을 찾을 수 없습니다: {checkpoint_path}")
-
-        checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+    # 1순위: curr 모델 시도
+    curr_path = save_path / f"{model_name}_curr.pth"
+    if curr_path.exists():
+        checkpoint = torch.load(str(curr_path), map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
 
         if optimizer and 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-        print(f"Best 모델 로드: {checkpoint_path}")
-        return -1  # Best 모델은 -1 반환
-
-    else:
-        # 최신 epoch 모델 로드
-        latest_checkpoint = find_latest_checkpoint(save_dir, model_name)
-        if latest_checkpoint is None:
-            raise FileNotFoundError(f"체크포인트를 찾을 수 없습니다: {model_name}_epoch*.pth")
-
-        checkpoint_path, epoch = latest_checkpoint
-        checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
-
-        if optimizer and 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-        print(f"Epoch {epoch} 모델 로드: {checkpoint_path}")
+        epoch = checkpoint.get('epoch', -1)
+        print(f"Current 모델 로드 (epoch {epoch}): {curr_path}")
         return epoch
+
+    # 2순위: best 모델 시도
+    if load_best:
+        best_path = save_path / f"{model_name}_best.pth"
+        if best_path.exists():
+            checkpoint = torch.load(str(best_path), map_location=device, weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'])
+
+            if optimizer and 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            epoch = checkpoint.get('epoch', -1)
+            print(f"Best 모델 로드 (epoch {epoch}): {best_path}")
+            return epoch
+
+    # 3순위: 최신 epoch 모델 로드
+    latest_checkpoint = find_latest_checkpoint(save_dir, model_name)
+    if latest_checkpoint is None:
+        raise FileNotFoundError(f"체크포인트를 찾을 수 없습니다: {model_name}_*.pth")
+
+    checkpoint_path, epoch = latest_checkpoint
+    checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
+
+    if optimizer and 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    print(f"Epoch {epoch} 모델 로드: {checkpoint_path}")
+    return epoch
 
 
 def find_latest_checkpoint(

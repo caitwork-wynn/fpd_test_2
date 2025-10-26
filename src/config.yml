@@ -5,11 +5,12 @@ learning_model:
     save_dir: '../model'
     save_best_only: false
     save_frequency: 100            # 에폭 단위
+    save_frequency_curr: 10        # _curr.pth 저장 주기 (에폭 단위, 기본 10)
     # save_file_name: 'floor_attention'  # Floor only attention model - floor_model_attention.py의 SAVE_FILE_NAME 사용
     
 # 데이터
 data:
-  source_folder: "../data/learning_lc"  # 학습 데이터 경로
+  source_folder: "../data/learning"  # 학습 데이터 경로
   labels_file: "labels.txt"  # 레이블 파일명
   test_id_suffix: '1'
   validation_ratio: 0.2
