@@ -195,13 +195,14 @@ def validate(model, dataloader, device, data_path=None):
     return avg_loss, avg_errors, all_errors, detailed_results
 
 
-def create_visualization_grid(detailed_results, output_path, num_samples=40, grid_size=(8, 5)):
+def create_visualization_grid(detailed_results, output_path, image_size, num_samples=40, grid_size=(8, 5)):
     """
     테스트 결과를 그리드 형태로 시각화하여 저장
 
     Args:
         detailed_results: 테스트 결과 리스트
         output_path: 저장할 파일 경로
+        image_size: 모델 입력 이미지 사이즈 [width, height]
         num_samples: 샘플 개수 (기본값: 40)
         grid_size: 그리드 크기 (rows, cols) (기본값: (8, 5))
     """
@@ -242,9 +243,9 @@ def create_visualization_grid(detailed_results, output_path, num_samples=40, gri
         # 원본 이미지 크기 가져오기
         orig_h, orig_w = img.shape[:2]
 
-        # 96x96 좌표를 원본 이미지 크기로 스케일링
-        # 모델 입력 크기는 96x96이므로 이를 기준으로 스케일 계산
-        model_size = 96.0
+        # 모델 입력 좌표를 원본 이미지 크기로 스케일링
+        # 모델 설정에서 읽어온 이미지 사이즈를 기준으로 스케일 계산
+        model_size = float(image_size[0])  # 모델 설정에서 읽어온 이미지 사이즈 사용
         scale_x = orig_w / model_size
         scale_y = orig_h / model_size
 
@@ -259,7 +260,7 @@ def create_visualization_grid(detailed_results, output_path, num_samples=40, gri
         # 파란색으로 실제 좌표 그리기 (이중 원 구조)
         labeled = result['labeled']
         for point_name, (x, y) in labeled.items():
-            # 96x96 스케일의 좌표를 원본 크기로 변환
+            # 모델 입력 스케일의 좌표를 원본 크기로 변환
             scaled_x = int(x * scale_x)
             scaled_y = int(y * scale_y)
             # 외각: 포인트별 색상 (큰 원, 테두리만)
@@ -271,7 +272,7 @@ def create_visualization_grid(detailed_results, output_path, num_samples=40, gri
         # 빨간색으로 예측 좌표 그리기 (이중 원 구조)
         predict = result['predict']
         for point_name, (x, y) in predict.items():
-            # 96x96 스케일의 좌표를 원본 크기로 변환
+            # 모델 입력 스케일의 좌표를 원본 크기로 변환
             scaled_x = int(x * scale_x)
             scaled_y = int(y * scale_y)
             # 외각: 포인트별 색상 (큰 원, 테두리만)
@@ -742,7 +743,7 @@ def main():
     visualization_file = result_dir / f"inference_pretrained_model_{timestamp}.jpg"
 
     try:
-        create_visualization_grid(detailed_results, str(visualization_file), num_samples=40, grid_size=(8, 5))
+        create_visualization_grid(detailed_results, str(visualization_file), features_config['image_size'], num_samples=40, grid_size=(8, 5))
         log_print(f"시각화 이미지 저장 완료: {visualization_file}")
     except Exception as e:
         log_print(f"시각화 이미지 생성 실패: {e}")

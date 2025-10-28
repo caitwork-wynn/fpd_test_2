@@ -602,6 +602,9 @@ class DataSet(Dataset):
 
         print(f"{mode.upper()} 데이터셋: {len(self.data)}개 샘플 (증강 전)")
 
+        # 데이터 구조 출력
+        self.print_dataset_info()
+
     def load_data(self, labels_file: str):
         """레이블 파일 로드"""
         labels_path = os.path.join(self.source_folder, labels_file)
@@ -680,6 +683,41 @@ class DataSet(Dataset):
         x = norm_x * (self.coord_max_x - self.coord_min_x) + self.coord_min_x
         y = norm_y * (self.coord_max_y - self.coord_min_y) + self.coord_min_y
         return x, y
+
+    def print_dataset_info(self):
+        """데이터셋 구조 정보 출력"""
+        print("\n" + "="*50)
+        print(f"Dataset 구조 정보 [{self.mode.upper()}]")
+        print("="*50)
+        print(f"전체 샘플 수: {len(self.data)}개")
+        print(f"이미지 크기: {self.image_size}")
+
+        # 사용 가능한 포인트 감지
+        if len(self.data) > 0:
+            sample = self.data[0]
+            available_points = []
+            for point in ['center', 'floor', 'front', 'side']:
+                if f'{point}_x' in sample and f'{point}_y' in sample:
+                    # 0이 아닌 실제 좌표가 있는지 확인
+                    if sample[f'{point}_x'] != 0 or sample[f'{point}_y'] != 0:
+                        available_points.append(point)
+
+            print(f"사용 가능한 포인트: {available_points}")
+            print(f"좌표 개수: {len(available_points) * 2}개 ({len(available_points)} points × 2)")
+
+        print(f"좌표 범위: x=[{self.coord_min_x}, {self.coord_max_x}], y=[{self.coord_min_y}, {self.coord_max_y}]")
+
+        # 증강 설정
+        if self.mode == 'train' and self.augment:
+            print(f"증강 설정: 활성화됨 (count={self.augment_count})")
+            if self.crop_enabled:
+                print(f"  - 크롭 증강: 활성화")
+            total_samples = len(self.data) * (1 + self.augment_count)
+            print(f"증강 후 총 샘플 수: {total_samples}개")
+        else:
+            print(f"증강 설정: 비활성화")
+
+        print("="*50 + "\n")
 
     def preprocess_image(self, image: np.ndarray) -> torch.Tensor:
         """이미지 전처리 (BGR → Grayscale → Normalize)"""

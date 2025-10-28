@@ -108,14 +108,29 @@ def preprocess_image(img_crop, target_size):
     return img_tensor
 
 
-def denormalize_coordinates(normalized_coords, coord_min_x=-112, coord_max_x=224, coord_min_y=0, coord_max_y=224):
+def denormalize_coordinates(normalized_coords, image_size, coord_min_x=None, coord_max_x=None, coord_min_y=None, coord_max_y=None):
     """
     정규화된 좌표를 픽셀 좌표로 역정규화
 
-    모델은 112x112 픽셀 기준의 확장된 좌표 범위를 사용:
-    - X: -112 ~ 224 (음수 허용, 이미지 크기의 2배까지)
-    - Y: 0 ~ 224 (이미지 크기의 2배까지)
+    모델은 이미지 크기 기준의 확장된 좌표 범위를 사용:
+    - X: -image_size ~ (2 * image_size) (음수 허용, 이미지 크기의 2배까지)
+    - Y: 0 ~ (2 * image_size) (이미지 크기의 2배까지)
+
+    Args:
+        normalized_coords: 정규화된 좌표 리스트
+        image_size: 모델 입력 이미지 크기 [width, height]
+        coord_min_x, coord_max_x, coord_min_y, coord_max_y: 좌표 범위 (기본값은 image_size 기반으로 자동 계산)
     """
+    # 기본값 설정 (image_size 기반)
+    img_w, img_h = image_size[0], image_size[1]
+    if coord_min_x is None:
+        coord_min_x = -img_w
+    if coord_max_x is None:
+        coord_max_x = 2 * img_w
+    if coord_min_y is None:
+        coord_min_y = 0
+    if coord_max_y is None:
+        coord_max_y = 2 * img_h
     pixel_coords = []
     for i in range(0, len(normalized_coords), 2):
         x_norm = normalized_coords[i]
@@ -283,20 +298,22 @@ def process_test_data(test_data_dir: Path, result_dir: Path, model, detector, ta
             # 좌표 추출
             outputs_coords = outputs['coordinates'].cpu().numpy()[0]  # [N]
 
-            # 역정규화 (112x112 픽셀 기준 좌표로 변환)
-            # 모델의 학습 데이터는 112x112 픽셀 기준으로 정규화됨
-            pixel_coords_112 = denormalize_coordinates(outputs_coords)
+            # 역정규화 (모델 입력 이미지 크기 기준 좌표로 변환)
+            # 모델 설정에서 읽어온 image_size 기준으로 정규화됨
+            pixel_coords_model = denormalize_coordinates(outputs_coords, image_size)
 
             # 포인트 딕셔너리 생성 (원본 이미지 기준 좌표)
             points_dict = {}
-            for idx, point_name in enumerate(target_points):
-                x_112 = pixel_coords_112[idx * 2]
-                y_112 = pixel_coords_112[idx * 2 + 1]
+            model_img_size = float(image_size[0])  # 모델 입력 이미지 크기
 
-                # 112x112 기준 좌표를 crop 이미지 크기로 스케일링
-                # 112x112 -> width x height
-                x_crop = x_112 * (width / 112.0)
-                y_crop = y_112 * (height / 112.0)
+            for idx, point_name in enumerate(target_points):
+                x_model = pixel_coords_model[idx * 2]
+                y_model = pixel_coords_model[idx * 2 + 1]
+
+                # 모델 입력 크기 기준 좌표를 crop 이미지 크기로 스케일링
+                # model_img_size x model_img_size -> width x height
+                x_crop = x_model * (width / model_img_size)
+                y_crop = y_model * (height / model_img_size)
 
                 # 원본 이미지 기준 좌표로 변환
                 x_original = x_crop + left
