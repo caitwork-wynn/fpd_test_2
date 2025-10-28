@@ -57,7 +57,15 @@
       "Bash(pip3 list:*)",
       "Bash(zip -r a.zip CLAUDE.md README.md data model requirements.txt src)",
       "Bash(pip3 show:*)",
-      "Bash(PYTHONUNBUFFERED=1 timeout 30 python3:*)"
+      "Bash(PYTHONUNBUFFERED=1 timeout 30 python3:*)",
+      "WebFetch(domain:docs.nvidia.com)",
+      "Bash(PYTHONUNBUFFERED=1 timeout 10 python3:*)",
+      "Bash(PYTHONUNBUFFERED=1 timeout 5 python3:*)",
+      "Bash(mv:*)",
+      "Bash(rmdir:*)",
+      "Bash(find:*)",
+      "Bash(zip:*)",
+      "Bash(tar:*)"
     ],
     "deny": [],
     "ask": []
