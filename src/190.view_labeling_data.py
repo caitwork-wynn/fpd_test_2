@@ -205,43 +205,49 @@ class LabelingDataViewer:
                 # 이미지 로드
                 img = Image.open(image_path)
 
-                # 좌표 추출
-                center_x = int(label_data['center_x'])
-                center_y = int(label_data['center_y'])
-                floor_x = int(label_data['floor_x'])
-                floor_y = int(label_data['floor_y'])
-                front_x = int(label_data['front_x'])
-                front_y = int(label_data['front_y'])
-                side_x = int(label_data['side_x'])
-                side_y = int(label_data['side_y'])
+                # 좌표 추출 (5개 컬럼 또는 11개 컬럼 지원)
+                has_all_coords = 'center_x' in label_data
+
+                floor_x = int(float(label_data['floor_x']))
+                floor_y = int(float(label_data['floor_y']))
+
+                if has_all_coords:
+                    # 11개 컬럼: 모든 좌표 사용
+                    center_x = int(float(label_data['center_x']))
+                    center_y = int(float(label_data['center_y']))
+                    front_x = int(float(label_data['front_x']))
+                    front_y = int(float(label_data['front_y']))
+                    side_x = int(float(label_data['side_x']))
+                    side_y = int(float(label_data['side_y']))
 
                 # 이미지에 포인트 그리기
                 draw = ImageDraw.Draw(img)
                 point_size = 4
 
-                # Center (빨강)
-                if self.show_center.get():
-                    draw.ellipse([center_x - point_size, center_y - point_size,
-                                 center_x + point_size, center_y + point_size],
-                                fill='red', outline='white', width=1)
+                if has_all_coords:
+                    # Center (빨강)
+                    if self.show_center.get():
+                        draw.ellipse([center_x - point_size, center_y - point_size,
+                                     center_x + point_size, center_y + point_size],
+                                    fill='red', outline='white', width=1)
 
-                # Floor (파랑)
+                    # Front (녹색)
+                    if self.show_front.get():
+                        draw.ellipse([front_x - point_size, front_y - point_size,
+                                     front_x + point_size, front_y + point_size],
+                                    fill='green', outline='white', width=1)
+
+                    # Side (노랑)
+                    if self.show_side.get():
+                        draw.ellipse([side_x - point_size, side_y - point_size,
+                                     side_x + point_size, side_y + point_size],
+                                    fill='yellow', outline='black', width=1)
+
+                # Floor (파랑) - 항상 사용 가능
                 if self.show_floor.get():
                     draw.ellipse([floor_x - point_size, floor_y - point_size,
                                  floor_x + point_size, floor_y + point_size],
                                 fill='blue', outline='white', width=1)
-
-                # Front (녹색)
-                if self.show_front.get():
-                    draw.ellipse([front_x - point_size, front_y - point_size,
-                                 front_x + point_size, front_y + point_size],
-                                fill='green', outline='white', width=1)
-
-                # Side (노랑)
-                if self.show_side.get():
-                    draw.ellipse([side_x - point_size, side_y - point_size,
-                                 side_x + point_size, side_y + point_size],
-                                fill='yellow', outline='black', width=1)
 
                 # 이미지 리사이즈 (썸네일)
                 img.thumbnail((300, 200), Image.Resampling.LANCZOS)
@@ -255,12 +261,17 @@ class LabelingDataViewer:
                 img_label.pack()
 
                 # 좌표 정보 표시
-                info_text = (
-                    f"● Center: ({center_x}, {center_y})\n"
-                    f"● Floor: ({floor_x}, {floor_y})\n"
-                    f"● Front: ({front_x}, {front_y})\n"
-                    f"● Side: ({side_x}, {side_y})"
-                )
+                if has_all_coords:
+                    info_text = (
+                        f"● Center: ({center_x}, {center_y})\n"
+                        f"● Floor: ({floor_x}, {floor_y})\n"
+                        f"● Front: ({front_x}, {front_y})\n"
+                        f"● Side: ({side_x}, {side_y})"
+                    )
+                else:
+                    # 5개 컬럼: floor만 표시
+                    info_text = f"● Floor: ({floor_x}, {floor_y})"
+
                 info_label = tk.Label(frame, text=info_text, font=("Arial", 7),
                                     bg="lightgray", justify=tk.LEFT)
                 info_label.pack()

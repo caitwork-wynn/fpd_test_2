@@ -52,10 +52,21 @@ def load_labels_data(config):
         header = lines[0].strip().split(',')
         print(f"헤더: {header}")
 
-        # 데이터 파싱
+        # 데이터 파싱 (5개 컬럼 또는 11개 컬럼 지원)
         for line in lines[1:]:
             parts = line.strip().split(',')
-            if len(parts) >= 7:
+            if len(parts) == 5:
+                # 5개 컬럼: ID,class,파일명,floor_x,floor_y
+                entry = {
+                    'id': parts[0],
+                    'opacity': float(parts[1]),  # class를 opacity로 사용
+                    'filename': parts[2],
+                    'floor_x': float(parts[3]),
+                    'floor_y': float(parts[4])
+                }
+                data.append(entry)
+            elif len(parts) >= 7:
+                # 11개 컬럼: ID,투명도,파일명,center_x,center_y,floor_x,floor_y,...
                 entry = {
                     'id': parts[0],
                     'opacity': float(parts[1]),

@@ -65,7 +65,11 @@
       "Bash(rmdir:*)",
       "Bash(find:*)",
       "Bash(zip:*)",
-      "Bash(tar:*)"
+      "Bash(tar:*)",
+      "Bash(if [ -f \"C:\\work\\fpd_test_2\\data\\learning\\labels.txt\" ])",
+      "Bash(then echo \"labels.txt EXISTS\")",
+      "Bash(else echo \"labels.txt NOT FOUND\")",
+      "Bash(fi)"
     ],
     "deny": [],
     "ask": []

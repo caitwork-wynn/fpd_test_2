@@ -6,8 +6,8 @@ check_labels.py
 
 체크 항목:
 1. 해당 이미지가 없다
-2. 각 좌표가 이미지의 영역을 벗어난다
-3. 좌표가 정수가 아니다
+2. 각 좌표가 허용 범위를 벗어난다 (이미지 크기의 ±10% 여유 허용)
+3. 좌표가 유효한 숫자가 아니다 (정수 또는 실수 허용)
 """
 
 import os
@@ -32,7 +32,7 @@ class LabelChecker:
         self.errors = {
             'missing_images': [],      # 이미지가 없는 경우
             'out_of_bounds': [],        # 좌표가 범위를 벗어난 경우
-            'non_integer_coords': [],   # 좌표가 정수가 아닌 경우
+            'invalid_coords': [],       # 좌표가 유효한 숫자가 아닌 경우
             'other_errors': []          # 기타 오류
         }
         self.stats = {
@@ -42,12 +42,11 @@ class LabelChecker:
             'image_sizes': defaultdict(int)
         }
 
-    def is_integer(self, value_str):
-        """문자열이 정수인지 확인"""
+    def is_numeric(self, value_str):
+        """문자열이 유효한 숫자(정수 또는 실수)인지 확인"""
         try:
-            # 먼저 float로 변환 후 정수 여부 체크
-            float_val = float(value_str)
-            return float_val.is_integer()
+            float(value_str)
+            return True
         except:
             return False
 
@@ -70,10 +69,11 @@ class LabelChecker:
         Returns:
             bool: 유효한 레이블이면 True, 오류가 있으면 False
         """
-        if len(row) != 11:
+        # 5개 컬럼(floor만) 또는 11개 컬럼(모든 좌표) 지원
+        if len(row) not in [5, 11]:
             self.errors['other_errors'].append({
                 'line': line_num,
-                'error': f'잘못된 필드 개수: {len(row)}개 (11개여야 함)',
+                'error': f'잘못된 필드 개수: {len(row)}개 (5개 또는 11개여야 함)',
                 'data': row
             })
             return False
@@ -81,20 +81,28 @@ class LabelChecker:
         try:
             # 레이블 파싱
             id_val = row[0]
-            transparency = row[1]
+            class_or_transparency = row[1]
             filename = row[2]
 
-            # 좌표 필드
-            coord_fields = {
-                'center_x': row[3],
-                'center_y': row[4],
-                'floor_x': row[5],
-                'floor_y': row[6],
-                'front_x': row[7],
-                'front_y': row[8],
-                'side_x': row[9],
-                'side_y': row[10]
-            }
+            # 좌표 필드 (형식에 따라 다름)
+            if len(row) == 5:
+                # 5개 컬럼: ID,class,파일명,floor_x,floor_y
+                coord_fields = {
+                    'floor_x': row[3],
+                    'floor_y': row[4]
+                }
+            else:
+                # 11개 컬럼: ID,투명도,파일명,center_x,center_y,floor_x,floor_y,front_x,front_y,side_x,side_y
+                coord_fields = {
+                    'center_x': row[3],
+                    'center_y': row[4],
+                    'floor_x': row[5],
+                    'floor_y': row[6],
+                    'front_x': row[7],
+                    'front_y': row[8],
+                    'side_x': row[9],
+                    'side_y': row[10]
+                }
 
             has_error = False
 
@@ -116,56 +124,64 @@ class LabelChecker:
                 if img_width and img_height:
                     self.stats['image_sizes'][f'{img_width}x{img_height}'] += 1
 
-            # 2. 좌표가 정수인지 확인
+            # 2. 좌표가 유효한 숫자인지 확인
             for coord_name, coord_value in coord_fields.items():
-                # 정수 체크
-                if not self.is_integer(coord_value):
-                    self.errors['non_integer_coords'].append({
+                # 숫자 체크 (정수 또는 실수)
+                if not self.is_numeric(coord_value):
+                    self.errors['invalid_coords'].append({
                         'line': line_num,
                         'id': id_val,
                         'filename': filename,
                         'coord': coord_name,
                         'value': coord_value,
-                        'error': f'{coord_name}이 정수가 아님'
+                        'error': f'{coord_name}이 유효한 숫자가 아님'
                     })
                     has_error = True
 
-                # 3. 이미지가 있는 경우에만 범위 체크
+                # 3. 이미지가 있는 경우에만 범위 체크 (10% 여유 허용)
                 if img_width and img_height:
                     try:
-                        coord_int = int(float(coord_value))
+                        coord_val = float(coord_value)
+
+                        # 10% 여유 범위 계산
+                        margin_x = img_width * 0.1
+                        margin_y = img_height * 0.1
+                        min_x = -margin_x
+                        max_x = img_width - 1 + margin_x
+                        min_y = -margin_y
+                        max_y = img_height - 1 + margin_y
 
                         # X 좌표 체크
                         if '_x' in coord_name:
-                            if coord_int < 0 or coord_int >= img_width:
+                            if coord_val < min_x or coord_val > max_x:
                                 self.errors['out_of_bounds'].append({
                                     'line': line_num,
                                     'id': id_val,
                                     'filename': filename,
                                     'coord': coord_name,
-                                    'value': coord_int,
-                                    'valid_range': f'0~{img_width-1}',
+                                    'value': coord_val,
+                                    'valid_range': f'{min_x:.1f}~{max_x:.1f} (10% 여유)',
                                     'image_size': f'{img_width}x{img_height}',
-                                    'error': f'{coord_name}={coord_int}가 범위(0~{img_width-1})를 벗어남'
+                                    'error': f'{coord_name}={coord_val:.1f}가 허용 범위({min_x:.1f}~{max_x:.1f})를 벗어남'
                                 })
                                 has_error = True
 
                         # Y 좌표 체크
                         elif '_y' in coord_name:
-                            if coord_int < 0 or coord_int >= img_height:
+                            if coord_val < min_y or coord_val > max_y:
                                 self.errors['out_of_bounds'].append({
                                     'line': line_num,
                                     'id': id_val,
                                     'filename': filename,
                                     'coord': coord_name,
-                                    'value': coord_int,
-                                    'valid_range': f'0~{img_height-1}',
+                                    'value': coord_val,
+                                    'valid_range': f'{min_y:.1f}~{max_y:.1f} (10% 여유)',
                                     'image_size': f'{img_width}x{img_height}',
-                                    'error': f'{coord_name}={coord_int}가 범위(0~{img_height-1})를 벗어남'
+                                    'error': f'{coord_name}={coord_val:.1f}가 허용 범위({min_y:.1f}~{max_y:.1f})를 벗어남'
                                 })
                                 has_error = True
                     except:
-                        pass  # 이미 non_integer_coords에서 처리됨
+                        pass  # 이미 invalid_coords에서 처리됨
 
             return not has_error
 
@@ -224,15 +240,15 @@ class LabelChecker:
         print("\n[오류 종류별 개수]")
         print("-" * 40)
         print(f"1. 이미지 파일 없음: {len(self.errors['missing_images']):,}개")
-        print(f"2. 좌표가 이미지 영역을 벗어남: {len(self.errors['out_of_bounds']):,}개")
-        print(f"3. 좌표가 정수가 아님: {len(self.errors['non_integer_coords']):,}개")
+        print(f"2. 좌표가 허용 범위를 벗어남 (10% 여유 초과): {len(self.errors['out_of_bounds']):,}개")
+        print(f"3. 좌표가 유효한 숫자가 아님: {len(self.errors['invalid_coords']):,}개")
         print(f"4. 기타 오류: {len(self.errors['other_errors']):,}개")
 
         # 요약
         print("\n" + "=" * 80)
         total_errors = (len(self.errors['missing_images']) +
                        len(self.errors['out_of_bounds']) +
-                       len(self.errors['non_integer_coords']) +
+                       len(self.errors['invalid_coords']) +
                        len(self.errors['other_errors']))
 
         if total_errors == 0:
@@ -243,9 +259,9 @@ class LabelChecker:
             if self.errors['missing_images']:
                 print("- 누락된 이미지 파일 확인 및 복사")
             if self.errors['out_of_bounds']:
-                print("- 범위를 벗어난 좌표 클리핑 또는 수정")
-            if self.errors['non_integer_coords']:
-                print("- 실수형 좌표를 정수로 변환")
+                print("- 허용 범위(10% 여유)를 초과하는 좌표 클리핑 또는 수정")
+            if self.errors['invalid_coords']:
+                print("- 숫자가 아닌 좌표 값 수정")
 
     def save_error_report(self):
         """오류 보고서를 result 폴더에 JSON 파일로 저장"""
@@ -266,7 +282,7 @@ class LabelChecker:
             'errors': {
                 'missing_images': self.errors['missing_images'],
                 'out_of_bounds': self.errors['out_of_bounds'],
-                'non_integer_coords': self.errors['non_integer_coords'],
+                'invalid_coords': self.errors['invalid_coords'],
                 'other_errors': self.errors['other_errors']
             },
             'summary': {
@@ -275,7 +291,7 @@ class LabelChecker:
                 'error_labels': self.stats['error_labels'],
                 'total_missing_images': len(self.errors['missing_images']),
                 'total_out_of_bounds': len(self.errors['out_of_bounds']),
-                'total_non_integer_coords': len(self.errors['non_integer_coords']),
+                'total_invalid_coords': len(self.errors['invalid_coords']),
                 'total_other_errors': len(self.errors['other_errors'])
             }
         }
@@ -304,8 +320,8 @@ class LabelChecker:
 
             f.write("[오류 종류별 개수]\n")
             f.write(f"1. 이미지 파일 없음: {len(self.errors['missing_images']):,}개\n")
-            f.write(f"2. 좌표가 이미지 영역을 벗어남: {len(self.errors['out_of_bounds']):,}개\n")
-            f.write(f"3. 좌표가 정수가 아님: {len(self.errors['non_integer_coords']):,}개\n")
+            f.write(f"2. 좌표가 허용 범위를 벗어남 (10% 여유 초과): {len(self.errors['out_of_bounds']):,}개\n")
+            f.write(f"3. 좌표가 유효한 숫자가 아님: {len(self.errors['invalid_coords']):,}개\n")
             f.write(f"4. 기타 오류: {len(self.errors['other_errors']):,}개\n")
 
             # 오류 상세 내용 추가
@@ -317,18 +333,18 @@ class LabelChecker:
                     f.write(f"  ... 그 외 {len(self.errors['missing_images'])-100}개\n")
 
             if self.errors['out_of_bounds']:
-                f.write("\n[좌표 범위 벗어남 상세]\n")
+                f.write("\n[허용 범위 초과 좌표 상세]\n")
                 for i, err in enumerate(self.errors['out_of_bounds'][:100], 1):
                     f.write(f"  {i}. 라인 {err['line']}: {err['error']} - {err['filename']}\n")
                 if len(self.errors['out_of_bounds']) > 100:
                     f.write(f"  ... 그 외 {len(self.errors['out_of_bounds'])-100}개\n")
 
-            if self.errors['non_integer_coords']:
-                f.write("\n[정수가 아닌 좌표 상세]\n")
-                for i, err in enumerate(self.errors['non_integer_coords'][:100], 1):
+            if self.errors['invalid_coords']:
+                f.write("\n[유효하지 않은 좌표 상세]\n")
+                for i, err in enumerate(self.errors['invalid_coords'][:100], 1):
                     f.write(f"  {i}. 라인 {err['line']}: {err['coord']}={err['value']} - {err['filename']}\n")
-                if len(self.errors['non_integer_coords']) > 100:
-                    f.write(f"  ... 그 외 {len(self.errors['non_integer_coords'])-100}개\n")
+                if len(self.errors['invalid_coords']) > 100:
+                    f.write(f"  ... 그 외 {len(self.errors['invalid_coords'])-100}개\n")
 
         print(f"  요약: {txt_output_file.name}")
 
@@ -340,7 +356,7 @@ class LabelChecker:
             error_lines.add(err['line'])
         for err in self.errors['out_of_bounds']:
             error_lines.add(err['line'])
-        for err in self.errors['non_integer_coords']:
+        for err in self.errors['invalid_coords']:
             error_lines.add(err['line'])
         for err in self.errors['other_errors']:
             error_lines.add(err['line'])
@@ -355,7 +371,7 @@ class LabelChecker:
             error_images.add(err['filename'])
         for err in self.errors['out_of_bounds']:
             error_images.add(err['filename'])
-        for err in self.errors['non_integer_coords']:
+        for err in self.errors['invalid_coords']:
             error_images.add(err['filename'])
 
         return sorted(error_images)
@@ -467,7 +483,7 @@ def main():
     # 오류가 있는 경우 삭제 옵션 제공
     total_errors = (len(checker.errors['missing_images']) +
                    len(checker.errors['out_of_bounds']) +
-                   len(checker.errors['non_integer_coords']) +
+                   len(checker.errors['invalid_coords']) +
                    len(checker.errors['other_errors']))
 
     if total_errors > 0:

@@ -1,5 +1,5 @@
 learning_model:
-  source: 'model_defs/130.mpm_mobilenet_lightweight_optim.py'  # 메모리 캐싱 최적화 모델
+  source: 'model_defs/131.mpm_mobilenet_lightweight_floor_optim.py'  # 메모리 캐싱 최적화 모델
   # 모델 저장 설정
   checkpointing:
     save_dir: '../model'
@@ -21,7 +21,7 @@ data:
 training:
   batch_size: 512
   epochs: 20000
-  learning_rate: 0.0001
+  learning_rate: 0.001
   weight_decay: 0.01
   optimizer: 'adamw'  # adam, adamw, sgd
   gradient_clip: 5.0
