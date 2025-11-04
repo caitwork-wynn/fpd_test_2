@@ -349,18 +349,27 @@ class CoordinateClassificationHead(nn.Module):
             nn.Linear(input_dim // 2, num_bins)
         )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x: [B, input_dim]
         Returns:
             logits: [B, num_bins]
             coords: [B]
+            confidence: [B] - max probability (0~1, 높을수록 확실)
+            entropy: [B] - entropy (낮을수록 확실)
         """
         logits = self.classifier(x)
         probs = F.softmax(logits, dim=-1)
         coords = torch.sum(probs * self.bin_centers.unsqueeze(0), dim=-1)
-        return logits, coords
+
+        # Confidence: max probability
+        confidence = torch.max(probs, dim=-1)[0]
+
+        # Entropy: uncertainty measure
+        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
+
+        return logits, coords, confidence, entropy
 
     def create_soft_label(self, targets: torch.Tensor) -> torch.Tensor:
         """Gaussian soft label 생성"""
@@ -439,7 +448,7 @@ class MPMMobileNetLightweightModel(nn.Module):
             images: [B, 1, 96, 96] Grayscale images
 
         Returns:
-            dict with 'coordinates', 'pixel_coordinates', 'logits'
+            dict with 'coordinates', 'pixel_coordinates', 'logits', 'confidence', 'entropy'
         """
         B = images.size(0)
 
@@ -455,13 +464,19 @@ class MPMMobileNetLightweightModel(nn.Module):
         # Stage 4: Coordinate Prediction
         all_logits = []
         all_coords = []
+        all_confidences = []
+        all_entropies = []
 
         for head in self.coordinate_heads:
-            logits, coords = head(enhanced)
+            logits, coords, confidence, entropy = head(enhanced)
             all_logits.append(logits)
             all_coords.append(coords)
+            all_confidences.append(confidence)
+            all_entropies.append(entropy)
 
         pixel_coordinates = torch.stack(all_coords, dim=1)  # [B, 2] - floor만
+        confidences = torch.stack(all_confidences, dim=1)  # [B, 2]
+        entropies = torch.stack(all_entropies, dim=1)  # [B, 2]
 
         # 정규화
         norm_coordinates = torch.zeros_like(pixel_coordinates)
@@ -474,7 +489,9 @@ class MPMMobileNetLightweightModel(nn.Module):
         return {
             'logits': all_logits,
             'coordinates': norm_coordinates,
-            'pixel_coordinates': pixel_coordinates
+            'pixel_coordinates': pixel_coordinates,
+            'confidence': confidences,
+            'entropy': entropies
         }
 
     def compute_loss(self, outputs: Dict[str, torch.Tensor],
@@ -529,15 +546,28 @@ class MPMMobileNetLightweightModel(nn.Module):
 # ============================================
 
 class MPMMobileNetLightweightModelONNX(nn.Module):
-    """ONNX 변환용 래퍼 - 좌표만 반환"""
+    """ONNX 변환용 래퍼 - 좌표 및 confidence 반환"""
 
-    def __init__(self, model: MPMMobileNetLightweightModel):
+    def __init__(self, model: MPMMobileNetLightweightModel, include_confidence: bool = True):
         super().__init__()
         self.model = model
+        self.include_confidence = include_confidence
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """ONNX 변환용 - 좌표만 반환"""
+    def forward(self, images: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """ONNX 변환용 - 좌표 (및 confidence) 반환
+
+        Args:
+            images: [B, 1, 96, 96]
+
+        Returns:
+            if include_confidence=False:
+                coordinates: [B, 2] - floor만
+            if include_confidence=True:
+                (coordinates, confidence): ([B, 2], [B, 2])
+        """
         output = self.model(images)
+        if self.include_confidence:
+            return output['coordinates'], output['confidence']
         return output['coordinates']  # [B, 2] - floor만
 
 
