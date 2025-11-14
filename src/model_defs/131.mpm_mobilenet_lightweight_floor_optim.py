@@ -546,29 +546,36 @@ class MPMMobileNetLightweightModel(nn.Module):
 # ============================================
 
 class MPMMobileNetLightweightModelONNX(nn.Module):
-    """ONNX 변환용 래퍼 - 좌표 및 confidence 반환"""
+    """ONNX 변환용 래퍼 - 좌표, confidence, entropy 반환"""
 
-    def __init__(self, model: MPMMobileNetLightweightModel, include_confidence: bool = True):
+    def __init__(self, model: MPMMobileNetLightweightModel, include_confidence: bool = True, include_entropy: bool = True):
         super().__init__()
         self.model = model
         self.include_confidence = include_confidence
+        self.include_entropy = include_entropy
 
-    def forward(self, images: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """ONNX 변환용 - 좌표 (및 confidence) 반환
+    def forward(self, images: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        """ONNX 변환용 - 좌표 (및 confidence, entropy) 반환
 
         Args:
             images: [B, 1, 96, 96]
 
         Returns:
-            if include_confidence=False:
+            if include_confidence=False and include_entropy=False:
                 coordinates: [B, 2] - floor만
-            if include_confidence=True:
+            if include_confidence=True and include_entropy=False:
                 (coordinates, confidence): ([B, 2], [B, 2])
+            if include_confidence=True and include_entropy=True:
+                (coordinates, confidence, entropy): ([B, 2], [B, 2], [B, 2])
         """
         output = self.model(images)
-        if self.include_confidence:
+
+        if self.include_confidence and self.include_entropy:
+            return output['coordinates'], output['confidence'], output['entropy']
+        elif self.include_confidence:
             return output['coordinates'], output['confidence']
-        return output['coordinates']  # [B, 2] - floor만
+        else:
+            return output['coordinates']  # [B, 2] - floor만
 
 
 # ============================================

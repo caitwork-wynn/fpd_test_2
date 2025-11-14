@@ -320,8 +320,9 @@ def save_model_as_onnx(
 
                                     if hasattr(mobilenet_module, 'MPMMobileNetLightweightModelONNX'):
                                         MPMMobileNetLightweightModelONNX = mobilenet_module.MPMMobileNetLightweightModelONNX
-                                        export_model = MPMMobileNetLightweightModelONNX(model)
-                                        log_func(f"ONNX 변환: MPMMobileNetLightweightModelONNX 래퍼 사용 ({wrapper_path.name})")
+                                        # include_confidence=True, include_entropy=True로 모든 메트릭 포함
+                                        export_model = MPMMobileNetLightweightModelONNX(model, include_confidence=True, include_entropy=True)
+                                        log_func(f"ONNX 변환: MPMMobileNetLightweightModelONNX 래퍼 사용 (confidence + entropy 포함, {wrapper_path.name})")
                                         wrapper_loaded = True
                                 except Exception:
                                     pass
@@ -361,6 +362,44 @@ def save_model_as_onnx(
                 export_model = model
 
         # ONNX로 변환
+        # 래퍼가 confidence와 entropy를 포함하는지 확인
+        has_confidence = (
+            hasattr(export_model, 'include_confidence') and
+            export_model.include_confidence
+        )
+        has_entropy = (
+            hasattr(export_model, 'include_entropy') and
+            export_model.include_entropy
+        )
+
+        if has_confidence and has_entropy:
+            # 3개 출력 (coordinates + confidence + entropy)
+            output_names = ['coordinates', 'confidence', 'entropy']
+            dynamic_axes = {
+                input_names[0]: {0: 'batch_size'},
+                'coordinates': {0: 'batch_size'},
+                'confidence': {0: 'batch_size'},
+                'entropy': {0: 'batch_size'}
+            }
+            log_func("ONNX 변환: 3개 출력 모드 (coordinates + confidence + entropy)")
+        elif has_confidence:
+            # 2개 출력 (coordinates + confidence)
+            output_names = ['coordinates', 'confidence']
+            dynamic_axes = {
+                input_names[0]: {0: 'batch_size'},
+                'coordinates': {0: 'batch_size'},
+                'confidence': {0: 'batch_size'}
+            }
+            log_func("ONNX 변환: 2개 출력 모드 (coordinates + confidence)")
+        else:
+            # 단일 출력 (coordinates만)
+            output_names = ['coordinates']
+            dynamic_axes = {
+                input_names[0]: {0: 'batch_size'},
+                'coordinates': {0: 'batch_size'}
+            }
+            log_func("ONNX 변환: 단일 출력 모드 (coordinates만)")
+
         with torch.no_grad():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -372,11 +411,8 @@ def save_model_as_onnx(
                     opset_version=18,  # PyTorch 권장 버전, ReduceMean 호환성
                     do_constant_folding=True,
                     input_names=input_names,
-                    output_names=['coordinates'],
-                    dynamic_axes={
-                        input_names[0]: {0: 'batch_size'},
-                        'coordinates': {0: 'batch_size'}
-                    },
+                    output_names=output_names,
+                    dynamic_axes=dynamic_axes,
                     operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
                     verbose=False
                 )
