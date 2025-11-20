@@ -37,6 +37,10 @@ training:
       min_ratio: 0.8  # 최소 크롭 비율 (80%)
       max_ratio: 1.0  # 최대 크롭 비율 (100%)
       max_shift: 0.15  # 최대 이동 비율 (15%)
+    # 좌우 반전 증강 설정
+    flip:
+      enabled: true
+      probability: 0.5  # 50% 확률로 적용
     # 좌표 정규화 범위 설정 (112x112 이미지 기준)
     coordinate_range:
       x_min_ratio: -1.0   # x 최소: -112 (-width)

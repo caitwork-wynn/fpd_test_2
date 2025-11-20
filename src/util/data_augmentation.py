@@ -88,7 +88,7 @@ class FlexibleAugmentation:
         Args:
             image: 입력 이미지
             coords: 좌표 딕셔너리
-            aug_type: 증강 타입 ('crop', 'rotate', 'noise' 등)
+            aug_type: 증강 타입 ('crop', 'flip', 'rotate', 'noise' 등)
             target_size: 목표 이미지 크기
             config: 증강 설정
 
@@ -97,6 +97,11 @@ class FlexibleAugmentation:
         """
         if aug_type == 'crop':
             return apply_crop_augmentation(image, coords, target_size, config.get('crop', {}))
+        elif aug_type == 'flip':
+            # flip은 target_size를 사용하지 않음
+            direction = config.get('flip', {}).get('direction', None)
+            flipped_image, flipped_coords, _ = apply_flip_augmentation(image, coords, direction)
+            return flipped_image, flipped_coords
         elif aug_type == 'rotate':
             # 향후 구현
             raise NotImplementedError("Rotation augmentation not implemented yet")
@@ -105,6 +110,52 @@ class FlexibleAugmentation:
             raise NotImplementedError("Noise augmentation not implemented yet")
         else:
             raise ValueError(f"Unknown augmentation type: {aug_type}")
+
+
+def apply_flip_augmentation(
+    image: np.ndarray,
+    coords: Dict[str, float],
+    direction: Optional[int] = None
+) -> Tuple[np.ndarray, Dict[str, float], Optional[int]]:
+    """
+    좌우 반전 증강 및 좌표 조정 (유연한 포인트 개수 지원)
+
+    Args:
+        image: 원본 이미지 (H, W, C)
+        coords: 원본 좌표 딕셔너리 (픽셀 좌표)
+                - floor는 필수, center/front/side는 선택적
+                - 예: {'floor_x': 484, 'floor_y': 446, 'center_x': 484, 'center_y': 210}
+        direction: 128방위 (0~255), 선택적. 0이 북쪽.
+
+    Returns:
+        flipped_image: 좌우 반전된 이미지
+        flipped_coords: 반전된 좌표 딕셔너리
+        flipped_direction: 반전된 방위 (None이면 None 반환)
+    """
+    h, w = image.shape[:2]
+
+    # 이미지 좌우 반전 (1은 좌우 반전을 의미)
+    flipped_image = cv2.flip(image, 1)
+
+    # 모든 좌표를 동적으로 처리
+    flipped_coords = {}
+    for key, value in coords.items():
+        if key.endswith('_x'):  # X 좌표만 반전
+            # flipped_x = image_width - original_x
+            flipped_coords[key] = w - value
+        elif key.endswith('_y'):  # Y 좌표는 그대로
+            flipped_coords[key] = value
+        else:
+            # 좌표가 아닌 다른 메타데이터는 그대로 유지
+            flipped_coords[key] = value
+
+    # 방위 반전 (128방위 시스템: 0~255)
+    flipped_direction = None
+    if direction is not None:
+        # 좌우 반전: direction' = 256 - direction (mod 256)
+        flipped_direction = (256 - direction) % 256
+
+    return flipped_image, flipped_coords, flipped_direction
 
 
 def apply_crop_augmentation(
