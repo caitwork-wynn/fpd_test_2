@@ -29,7 +29,7 @@ training:
 
   # 데이터 증강
   augmentation:
-    enabled: false
+    enabled: true
     augment_count: 4  # 원본 데이터당 증강 샘플 수
     # 크롭 증강 설정
     crop:
@@ -40,7 +40,7 @@ training:
     # 좌우 반전 증강 설정
     flip:
       enabled: true
-      probability: 0.5  # 50% 확률로 적용
+      probability: 1.0  # 50% 확률로 적용
     # 좌표 정규화 범위 설정 (112x112 이미지 기준)
     coordinate_range:
       x_min_ratio: -1.0   # x 최소: -112 (-width)

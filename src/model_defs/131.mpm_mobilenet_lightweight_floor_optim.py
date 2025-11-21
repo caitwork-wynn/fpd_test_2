@@ -26,7 +26,7 @@ import warnings
 
 # util 폴더를 path에 추가
 sys.path.append(str(Path(__file__).parent.parent))
-from util.data_augmentation import apply_crop_augmentation
+from util.data_augmentation import apply_crop_augmentation, apply_flip_augmentation
 from util.image_resize import resize_image_with_coordinates
 
 # matplotlib 경고 억제
@@ -744,8 +744,10 @@ class DataSet(Dataset):
             print(f"증강 설정: 활성화됨 (count={self.augment_count})")
             if self.crop_enabled:
                 print(f"  - 크롭 증강: 활성화")
-            total_samples = len(self.data) * (1 + self.augment_count)
-            print(f"증강 후 총 샘플 수: {total_samples}개")
+            print(f"  - 좌우 반전(Flip) 증강: 활성화 (항상 적용)")
+            print(f"  - 증강 패턴: 원본(1) + crop×{self.augment_count} + flip(1) + flip+crop×{self.augment_count}")
+            total_samples = len(self.data) * (2 + 2 * self.augment_count)
+            print(f"증강 후 총 샘플 수: {total_samples}개 (원본 {len(self.data)}개 × {2 + 2 * self.augment_count})")
         else:
             print(f"증강 설정: 비활성화")
 
@@ -767,17 +769,43 @@ class DataSet(Dataset):
     def __len__(self):
         base_len = len(self.data)
         if self.mode == 'train' and self.augment:
-            return base_len * (1 + self.augment_count)
+            # 원본 + crop×N + flip + flip+crop×N = 2 + 2×augment_count
+            return base_len * (2 + 2 * self.augment_count)
         return base_len
 
     def __getitem__(self, idx):
-        # 원본 인덱스와 증강 여부 계산
+        # 원본 인덱스와 증강 타입 계산
         if self.mode == 'train' and self.augment:
-            base_idx = idx // (1 + self.augment_count)
-            is_augmented = (idx % (1 + self.augment_count)) > 0
+            total_variations = 2 + 2 * self.augment_count
+            base_idx = idx // total_variations
+            variation_idx = idx % total_variations
+
+            # 증강 타입 결정
+            # 0: 원본
+            # 1 ~ augment_count: 원본 + crop
+            # augment_count+1: flip
+            # augment_count+2 ~ end: flip + crop
+
+            if variation_idx == 0:
+                # 원본
+                apply_flip = False
+                apply_crop = False
+            elif variation_idx <= self.augment_count:
+                # 원본 + crop
+                apply_flip = False
+                apply_crop = True
+            elif variation_idx == self.augment_count + 1:
+                # flip만
+                apply_flip = True
+                apply_crop = False
+            else:
+                # flip + crop
+                apply_flip = True
+                apply_crop = True
         else:
             base_idx = idx
-            is_augmented = False
+            apply_flip = False
+            apply_crop = False
 
         sample = self.data[base_idx]
         image_path = os.path.join(self.source_folder, sample['filename'])
@@ -793,8 +821,12 @@ class DataSet(Dataset):
             'floor_y': sample['floor_y']
         }
 
-        # 증강 적용
-        if is_augmented and self.crop_enabled:
+        # 1단계: Flip 적용
+        if apply_flip:
+            orig_image, coords_orig, _ = apply_flip_augmentation(orig_image, coords_orig)
+
+        # 2단계: Crop 또는 Resize 적용
+        if apply_crop and self.crop_enabled:
             image_resized, coords_resized = apply_crop_augmentation(
                 orig_image, coords_orig, self.image_size, self.crop_config
             )
