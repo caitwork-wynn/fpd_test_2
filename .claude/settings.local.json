@@ -69,7 +69,14 @@
       "Bash(if [ -f \"C:\\work\\fpd_test_2\\data\\learning\\labels.txt\" ])",
       "Bash(then echo \"labels.txt EXISTS\")",
       "Bash(else echo \"labels.txt NOT FOUND\")",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(PYTHONDONTWRITEBYTECODE=1 timeout 10 python:*)",
+      "Bash(PYTHONUNBUFFERED=1 timeout 10 python:*)",
+      "Bash(nul)",
+      "Bash(if [ -d \"data/learning\" ])",
+      "Bash(then ls data/learning)",
+      "Bash(else echo \"Directory not found at data/learning\")",
+      "Bash(PYTHONDONTWRITEBYTECODE=1 timeout 30 python:*)"
     ],
     "deny": [],
     "ask": []
