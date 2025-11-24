@@ -38,6 +38,9 @@ from util.dual_logger import DualLogger
 from util.save_load_model import save_model, load_model
 from util.error_analysis import display_error_analysis, save_error_analysis_json, save_training_log_csv
 from util.plot_training_progress import plot_training_progress
+from util.onnx_inference import get_test_samples_by_id_filter, batch_predict_onnx
+from util.visualize_prediction import draw_prediction_and_label, create_all_progress_composites
+import cv2
 
 
 def train_epoch(model, dataloader, optimizer, device, config):
@@ -460,74 +463,6 @@ def main():
         num_workers=0
     )
 
-    # 학습 데이터 좌표 통계 계산 및 출력
-    log_print("\n=== 학습 데이터 레이블 좌표 통계 ===")
-
-    # 학습 데이터셋의 모든 타겟 좌표 수집
-    all_targets = []
-    # targets 속성이 있는지 확인 (특징 사전 추출 모드)
-    if hasattr(train_dataset, 'targets') and train_dataset.targets is not None:
-        for i in range(len(train_dataset.targets)):
-            target = train_dataset.targets[i].numpy()
-            if target.ndim == 1:
-                all_targets.append(target)
-            else:
-                all_targets.append(target.flatten())
-        all_targets = np.array(all_targets)  # [N, num_coords]
-    else:
-        # On-the-fly 처리 모드: DataLoader를 통해 타겟 수집
-        for batch in train_loader:
-            batch_targets = batch['targets'].numpy()  # [B, num_coords]
-            for i in range(len(batch_targets)):
-                all_targets.append(batch_targets[i])
-        all_targets = np.array(all_targets) if len(all_targets) > 0 else np.array([])  # [N, num_coords]
-
-    # 각 좌표별 통계 계산 (정규화된 값)
-    coord_stats_normalized = {}
-    coord_stats_pixel = {}
-
-    for idx, point_name in enumerate(target_points):
-        x_idx = idx * 2
-        y_idx = idx * 2 + 1
-
-        # 정규화된 좌표의 평균과 표준편차
-        x_norm_mean = np.mean(all_targets[:, x_idx])
-        x_norm_std = np.std(all_targets[:, x_idx])
-        y_norm_mean = np.mean(all_targets[:, y_idx])
-        y_norm_std = np.std(all_targets[:, y_idx])
-
-        coord_stats_normalized[point_name] = {
-            'x_mean': x_norm_mean,
-            'x_std': x_norm_std,
-            'y_mean': y_norm_mean,
-            'y_std': y_norm_std
-        }
-
-        # 픽셀 좌표로 변환
-        x_pixel_vals = all_targets[:, x_idx] * (train_dataset.coord_max_x - train_dataset.coord_min_x) + train_dataset.coord_min_x
-        y_pixel_vals = all_targets[:, y_idx] * (train_dataset.coord_max_y - train_dataset.coord_min_y) + train_dataset.coord_min_y
-
-        x_pixel_mean = np.mean(x_pixel_vals)
-        x_pixel_std = np.std(x_pixel_vals)
-        y_pixel_mean = np.mean(y_pixel_vals)
-        y_pixel_std = np.std(y_pixel_vals)
-
-        coord_stats_pixel[point_name] = {
-            'x_mean': x_pixel_mean,
-            'x_std': x_pixel_std,
-            'y_mean': y_pixel_mean,
-            'y_std': y_pixel_std
-        }
-
-        # 화면 출력
-        log_print(f"\n[{point_name.upper()}]")
-        log_print(f"  픽셀 좌표:")
-        log_print(f"    X: 평균 = {x_pixel_mean:.2f}px, 표준편차 = {x_pixel_std:.2f}px")
-        log_print(f"    Y: 평균 = {y_pixel_mean:.2f}px, 표준편차 = {y_pixel_std:.2f}px")
-
-    log_print(f"\n총 학습 샘플 수: {len(all_targets)}")
-    log_print("=" * 60)
-
     # 옵티마이저 설정
     optimizer_name = config['training']['optimizer'].lower()
     learning_rate = config['training']['learning_rate']
@@ -948,6 +883,108 @@ def main():
                 best_logger.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ")
                 best_logger.write(f"에폭 {epoch}: 손실={val_loss:.6f}, ")
                 best_logger.write(f"평균 오차={avg_error:.2f}px\n")
+
+            # Best 모델 저장 후 테스트 데이터 예측 시각화
+            try:
+                # ONNX 파일 경로
+                onnx_path = checkpoint_dir / f"{save_file_name}_best.onnx"
+
+                if onnx_path.exists():
+                    log_print(f"\n[테스트 데이터 예측 시각화 시작]")
+
+                    # 테스트 샘플 전체에서 균등 간격으로 20개 선택
+                    max_samples = 20
+                    filtered_samples = []
+                    dataset_samples = None
+                    if hasattr(test_dataset, 'samples'):
+                        dataset_samples = test_dataset.samples
+                    elif hasattr(test_dataset, 'data'):
+                        dataset_samples = test_dataset.data
+
+                    if dataset_samples is not None:
+                        total_samples = len(dataset_samples)
+                        if total_samples > 0:
+                            # 균등 간격 계산
+                            if total_samples <= max_samples:
+                                # 전체 샘플이 20개 이하면 전체 선택
+                                indices = list(range(total_samples))
+                            else:
+                                # 균등 간격으로 20개 선택
+                                step = total_samples / max_samples
+                                indices = [int(i * step) for i in range(max_samples)]
+
+                            log_print(f"전체 {total_samples}개 중 균등 간격으로 {len(indices)}개 선택")
+
+                            for idx in indices:
+                                sample = dataset_samples[idx]
+
+                                # 이미지 전체 경로 생성
+                                image_path = Path(test_dataset.source_folder) / sample['filename']
+
+                                # 정답 좌표 추출
+                                label_coords = {}
+                                for key, value in sample.items():
+                                    if key.endswith('_x') or key.endswith('_y'):
+                                        label_coords[key] = value
+
+                                filtered_samples.append({
+                                    'id': sample['id'],
+                                    'filename': sample['filename'],
+                                    'image_path': str(image_path),
+                                    'label_coords': label_coords
+                                })
+
+                    if filtered_samples:
+                        # 좌표 범위 설정
+                        coord_ranges = {
+                            'x': (test_dataset.coord_min_x, test_dataset.coord_max_x),
+                            'y': (test_dataset.coord_min_y, test_dataset.coord_max_y)
+                        }
+
+                        # ONNX 일괄 추론
+                        prediction_results = batch_predict_onnx(
+                            onnx_path=str(onnx_path),
+                            samples=filtered_samples,
+                            coord_ranges=coord_ranges,
+                            image_size=features_config['image_size'][0]
+                        )
+
+                        # 테스트 이미지 저장 디렉토리
+                        test_image_dir = result_dir / "test_image"
+                        test_image_dir.mkdir(parents=True, exist_ok=True)
+
+                        # 각 샘플에 대해 시각화 이미지 생성
+                        for result in prediction_results:
+                            vis_image = draw_prediction_and_label(
+                                image_path=result['image_path'],
+                                pred_coords=result['pred_coords'],
+                                label_coords=result['label_coords'],
+                                point_names=target_points,
+                                output_size=None  # 원본 크기 유지
+                            )
+
+                            # 저장: {id}-{epoch}.jpg
+                            save_path = test_image_dir / f"{result['id']}-{epoch}.jpg"
+                            cv2.imwrite(str(save_path), vis_image)
+
+                        # 진행 상태 합성 이미지 생성
+                        progress_dir = result_dir / "test_image_progress"
+                        create_all_progress_composites(
+                            test_image_dir=test_image_dir,
+                            output_dir=progress_dir,
+                            model_name=save_file_name,
+                            max_images=10  # 최대 10개 epoch 표시 (첫/마지막 포함, 균등 간격)
+                        )
+                    else:
+                        log_print("필터링된 테스트 샘플이 없습니다.\n")
+                else:
+                    log_print(f"ONNX 파일을 찾을 수 없습니다: {onnx_path}\n")
+
+            except Exception as e:
+                log_print(f"테스트 데이터 예측 시각화 실패: {e}\n")
+                import traceback
+                log_print(traceback.format_exc())
+
         else:
             patience_counter += 1
 
@@ -1169,23 +1206,6 @@ def main():
     training_end_datetime = datetime.now()  # 학습 종료 시간
 
     with open(final_txt_path, 'w', encoding='utf-8') as f:
-        # 학습 데이터 레이블 좌표 통계 추가
-        f.write("=" * 60 + "\n")
-        f.write("학습 데이터 레이블 좌표 통계\n")
-        f.write("=" * 60 + "\n\n")
-
-        for point_name in target_points:
-            stats_norm = coord_stats_normalized[point_name]
-            stats_pix = coord_stats_pixel[point_name]
-
-            f.write(f"[{point_name.upper()}]\n")
-            f.write(f"  픽셀 좌표:\n")
-            f.write(f"    X: 평균 = {stats_pix['x_mean']:.2f}px, 표준편차 = {stats_pix['x_std']:.2f}px\n")
-            f.write(f"    Y: 평균 = {stats_pix['y_mean']:.2f}px, 표준편차 = {stats_pix['y_std']:.2f}px\n\n")
-
-        f.write(f"총 학습 샘플 수: {len(all_targets)}\n")
-        f.write("=" * 60 + "\n\n")
-
         # 테스트 결과
         f.write("=== 테스트 데이터 최종 평가 ===\n\n")
         for line in output_lines:
