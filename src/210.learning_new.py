@@ -37,6 +37,7 @@ sys.path.append(str(Path(__file__).parent))
 from util.dual_logger import DualLogger
 from util.save_load_model import save_model, load_model
 from util.error_analysis import display_error_analysis, save_error_analysis_json, save_training_log_csv
+from util.plot_training_progress import plot_training_progress
 
 
 def train_epoch(model, dataloader, optimizer, device, config):
@@ -1000,6 +1001,18 @@ def main():
                 )
                 log_print(f"Epoch 체크포인트 저장: {checkpoint_path}")
 
+        # 매 epoch마다 학습 진행 상태 그래프 생성
+        if len(training_log) > 1:  # 최소 2개 에폭 필요
+            graph_path = results_base_dir / f"{save_file_name}_progress.png"
+            try:
+                plot_training_progress(
+                    training_log=training_log,
+                    save_path=str(graph_path),
+                    point_names=target_points
+                )
+            except Exception as e:
+                log_print(f"그래프 생성 실패: {e}")
+
     # 학습 완료 시간 계산
     total_training_time = time.time() - training_start_time
     total_hours = int(total_training_time // 3600)
@@ -1009,6 +1022,19 @@ def main():
     # 학습 로그 CSV 저장 (항상 저장)
     log_csv_path = result_dir / "training_log.csv"
     save_training_log_csv(training_log, str(log_csv_path))
+
+    # 최종 학습 진행 상태 그래프 생성
+    if len(training_log) > 1:
+        final_graph_path = results_base_dir / f"{save_file_name}_progress_final.png"
+        try:
+            plot_training_progress(
+                training_log=training_log,
+                save_path=str(final_graph_path),
+                point_names=target_points
+            )
+            log_print(f"최종 학습 진행 그래프 저장: {final_graph_path}")
+        except Exception as e:
+            log_print(f"최종 그래프 생성 실패: {e}")
 
     # 테스트 데이터 최종 평가
     log_print("\n=== 테스트 데이터 최종 평가 ===")
