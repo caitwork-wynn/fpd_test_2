@@ -601,7 +601,7 @@ class DataSet(Dataset):
         self.mode = mode
         self.config = config or {}
         self.augment = augment and (mode == 'train')
-        self.target_points = target_points or ['center', 'floor', 'front', 'side']
+        self.target_points = target_points or ['floor']
         self.num_coordinates = len(self.target_points) * 2
 
         # 설정
@@ -878,7 +878,7 @@ class PointDetector:
         self.config = config
         self.device = device
 
-        self.target_points = config.get('target_points', ['center', 'floor', 'front', 'side'])
+        self.target_points = config.get('target_points', ['floor'])
         self.num_output_coords = len(self.target_points) * 2
 
         # 모델 생성

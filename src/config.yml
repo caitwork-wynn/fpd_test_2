@@ -30,7 +30,7 @@ training:
   # 데이터 증강
   augmentation:
     enabled: true
-    augment_count: 4  # 원본 데이터당 증강 샘플 수
+    augment_count: 1  # 원본 데이터당 증강 샘플 수
     # 크롭 증강 설정
     crop:
       enabled: true
