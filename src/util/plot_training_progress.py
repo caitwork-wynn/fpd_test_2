@@ -170,8 +170,6 @@ def plot_training_progress(
     plt.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
     plt.close(fig)
 
-    print(f"학습 진행 그래프 저장: {save_path}")
-
 
 def plot_training_progress_simple(
     training_log: List[Dict],
@@ -214,8 +212,6 @@ def plot_training_progress_simple(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
     plt.close(fig)
-
-    print(f"학습 진행 그래프 저장: {save_path}")
 
 
 if __name__ == "__main__":

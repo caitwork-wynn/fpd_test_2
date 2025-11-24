@@ -101,16 +101,96 @@ def save_model(
 
     # 체크포인트 저장
     torch.save(checkpoint_data, str(checkpoint_path))
-    log_func(f"모델 저장: {checkpoint_path}")
 
     # Best 모델인 경우 ONNX도 저장
     if is_best and device is not None:
-        onnx_path = save_model_as_onnx(model, checkpoint_path, device, log_func)
+        # ONNX 변환 로그 비활성화
+        def silent_log(msg):
+            pass
+        onnx_path = save_model_as_onnx(model, checkpoint_path, device, silent_log)
         if onnx_path and onnx_path.exists():
             onnx_size_mb = onnx_path.stat().st_size / (1024 * 1024)
-            log_func(f"ONNX 모델 저장: {onnx_path.name} ({onnx_size_mb:.2f}MB)")
+            log_func(f"모델 저장: {checkpoint_path}, ONNX: {onnx_path.name} ({onnx_size_mb:.2f}MB)")
+        else:
+            log_func(f"모델 저장: {checkpoint_path}")
+    else:
+        log_func(f"모델 저장: {checkpoint_path}")
 
     return checkpoint_path
+
+
+def find_onnx_wrapper_from_config(model: torch.nn.Module, log_func: Optional[Callable[[str], None]] = None):
+    """
+    config.yml에서 모델 파일을 찾아 ONNX 래퍼 클래스를 자동으로 탐색
+
+    Args:
+        model: PyTorch 모델
+        log_func: 로깅 함수
+
+    Returns:
+        ONNX 래퍼 인스턴스 또는 None
+    """
+    if log_func is None:
+        log_func = print
+
+    try:
+        import importlib.util
+
+        # config.yml에서 현재 모델 경로 가져오기
+        model_path = get_model_path_from_config()
+
+        if not model_path or not model_path.exists():
+            return None
+
+        # 모델 모듈 동적 import
+        spec = importlib.util.spec_from_file_location("model_module_temp", str(model_path))
+        model_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(model_module)
+
+        # 모듈 내에서 *ONNX 패턴의 클래스 찾기
+        onnx_wrapper_class = None
+        for name in dir(model_module):
+            if name.endswith('ONNX') and not name.startswith('_'):
+                obj = getattr(model_module, name)
+                # 클래스인지 확인
+                if isinstance(obj, type) and issubclass(obj, nn.Module):
+                    onnx_wrapper_class = obj
+                    log_func(f"ONNX 변환: {name} 래퍼 클래스 발견 ({model_path.name})")
+                    break
+
+        if onnx_wrapper_class is None:
+            return None
+
+        # ONNX 래퍼 인스턴스 생성 (include_confidence, include_entropy 자동 설정)
+        try:
+            # 생성자 시그니처 확인
+            import inspect
+            sig = inspect.signature(onnx_wrapper_class.__init__)
+            params = list(sig.parameters.keys())
+
+            # include_confidence, include_entropy 파라미터가 있으면 True로 설정
+            kwargs = {}
+            if 'include_confidence' in params:
+                kwargs['include_confidence'] = True
+            if 'include_entropy' in params:
+                kwargs['include_entropy'] = True
+
+            wrapper_instance = onnx_wrapper_class(model, **kwargs)
+
+            if kwargs:
+                log_func(f"ONNX 변환: 래퍼 생성 완료 (옵션: {kwargs})")
+            else:
+                log_func(f"ONNX 변환: 래퍼 생성 완료")
+
+            return wrapper_instance
+
+        except Exception as e:
+            log_func(f"ONNX 래퍼 인스턴스 생성 실패: {e}")
+            return None
+
+    except Exception as e:
+        # 조용히 실패 (에러 로그 없이)
+        return None
 
 
 def save_model_as_onnx(
@@ -200,35 +280,35 @@ def save_model_as_onnx(
             dummy_input = torch.randn(1, input_dim)
             input_names = ['features']
             log_func(f"ONNX 변환: 특징 기반 모델 감지, 입력 차원={input_dim}")
-        elif hasattr(model, 'MODEL_NAME') and 'mobilenet' in model.MODEL_NAME.lower():
-            # MobileNet 모델: get_input_dim() 함수로부터 입력 차원 가져오기
+        elif hasattr(model, 'MODEL_NAME'):
+            # 이미지 입력 모델: get_input_dim() 함수로부터 입력 차원 가져오기
             try:
                 import importlib.util
                 # 모델 소스 파일 경로 찾기 - config.yml에서 가져오기
                 model_path = get_model_path_from_config()
-                
+
                 input_shape = None
                 if model_path and model_path.exists():
                     try:
-                        spec = importlib.util.spec_from_file_location("mobilenet_model_temp", str(model_path))
-                        mobilenet_module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(mobilenet_module)
+                        spec = importlib.util.spec_from_file_location("image_model_temp", str(model_path))
+                        image_module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(image_module)
 
-                        if hasattr(mobilenet_module, 'get_input_dim'):
-                            input_shape = mobilenet_module.get_input_dim()
-                            log_func(f"ONNX 변환: MobileNet 모델 감지 ({model_path.name}), 입력 shape={input_shape}")
+                        if hasattr(image_module, 'get_input_dim'):
+                            input_shape = image_module.get_input_dim()
+                            log_func(f"ONNX 변환: 이미지 모델 감지 ({model_path.name}), 입력 shape={input_shape}")
                     except Exception:
                         pass
 
                 if input_shape is None:
                     # fallback
                     input_shape = (1, 96, 96)
-                    log_func(f"ONNX 변환: MobileNet 모델 감지 (기본값), 입력 shape={input_shape}")
+                    log_func(f"ONNX 변환: 이미지 모델 감지 (기본값), 입력 shape={input_shape}")
 
                 dummy_input = torch.randn(1, *input_shape)
                 input_names = ['image']
             except Exception as e:
-                log_func(f"ONNX 변환 경고: MobileNet 입력 차원 자동 감지 실패 ({e}), 기본값 사용")
+                log_func(f"ONNX 변환 경고: 이미지 모델 입력 차원 자동 감지 실패 ({e}), 기본값 사용")
                 dummy_input = torch.randn(1, 1, 96, 96)
                 input_names = ['image']
         elif hasattr(model, 'feature_extractor'):
@@ -249,101 +329,13 @@ def save_model_as_onnx(
             # 출력이 딕셔너리인 경우 처리
             if isinstance(test_output, dict):
                 log_func("ONNX 변환: 딕셔너리 출력 모델 감지")
-                # 'coordinates' 키가 있으면 그것만 반환하는 래퍼 생성
+                # 'coordinates' 키가 있으면 ONNX 래퍼 자동 탐색
                 if 'coordinates' in test_output:
-                    # MPM 모델인 경우 전용 래퍼 사용
-                    if hasattr(model, 'MODEL_NAME') and model.MODEL_NAME == "mpm_cross_self_attention_vpi":
-                        try:
-                            # MPMAttentionModelONNX import (여러 파일 시도)
-                            import importlib.util
+                    # 범용 ONNX 래퍼 찾기 (config.yml 기반)
+                    export_model = find_onnx_wrapper_from_config(model, log_func)
 
-                            possible_wrapper_paths = [
-                                Path(__file__).parent.parent / "model_defs" / "001.mpm_cross_self_attention_vpi.py",
-                                Path(__file__).parent.parent / "model_defs" / "002.mpm_001_ex_canny.py",
-                                Path(__file__).parent.parent / "model_defs" / "mpm_cross_self_attention_vpi.py",
-                            ]
-
-                            wrapper_loaded = False
-                            for wrapper_path in possible_wrapper_paths:
-                                if wrapper_path.exists():
-                                    try:
-                                        spec = importlib.util.spec_from_file_location(
-                                            "mpm_model_wrapper",
-                                            str(wrapper_path)
-                                        )
-                                        mpm_module = importlib.util.module_from_spec(spec)
-                                        spec.loader.exec_module(mpm_module)
-
-                                        if hasattr(mpm_module, 'MPMAttentionModelONNX'):
-                                            MPMAttentionModelONNX = mpm_module.MPMAttentionModelONNX
-                                            export_model = MPMAttentionModelONNX(model)
-                                            log_func(f"ONNX 변환: MPMAttentionModelONNX 래퍼 사용 ({wrapper_path.name})")
-                                            wrapper_loaded = True
-                                            break
-                                    except Exception:
-                                        # 이 파일에서 로드 실패하면 다음 파일 시도
-                                        continue
-
-                            if not wrapper_loaded:
-                                # 모든 파일에서 래퍼를 찾지 못한 경우 기본 래퍼 사용
-                                raise ImportError("MPMAttentionModelONNX를 찾을 수 없음")
-
-                        except Exception as e:
-                            # 기본 래퍼 사용 (경고 없이 조용히 처리)
-                            class ONNXWrapper(nn.Module):
-                                def __init__(self, model):
-                                    super().__init__()
-                                    self.model = model
-
-                                def forward(self, x):
-                                    output_dict = self.model(x)
-                                    return output_dict['coordinates']
-
-                            export_model = ONNXWrapper(model)
-                            log_func("ONNX 변환: 기본 ONNX 래퍼 사용")
-                    elif hasattr(model, 'MODEL_NAME') and 'mobilenet' in model.MODEL_NAME.lower():
-                        # MobileNet 모델 전용 래퍼 시도
-                        try:
-                            import importlib.util
-                            # config.yml에서 현재 모델 경로 가져오기
-                            wrapper_path = get_model_path_from_config()
-                            
-                            wrapper_loaded = False
-                            if wrapper_path and wrapper_path.exists():
-                                try:
-                                    spec = importlib.util.spec_from_file_location(
-                                        "mobilenet_model_wrapper",
-                                        str(wrapper_path)
-                                    )
-                                    mobilenet_module = importlib.util.module_from_spec(spec)
-                                    spec.loader.exec_module(mobilenet_module)
-
-                                    if hasattr(mobilenet_module, 'MPMMobileNetLightweightModelONNX'):
-                                        MPMMobileNetLightweightModelONNX = mobilenet_module.MPMMobileNetLightweightModelONNX
-                                        # include_confidence=True, include_entropy=True로 모든 메트릭 포함
-                                        export_model = MPMMobileNetLightweightModelONNX(model, include_confidence=True, include_entropy=True)
-                                        log_func(f"ONNX 변환: MPMMobileNetLightweightModelONNX 래퍼 사용 (confidence + entropy 포함, {wrapper_path.name})")
-                                        wrapper_loaded = True
-                                except Exception:
-                                    pass
-
-                            if not wrapper_loaded:
-                                raise ImportError("MPMMobileNetLightweightModelONNX를 찾을 수 없음")
-
-                        except Exception:
-                            # 기본 래퍼 사용
-                            class ONNXWrapper(nn.Module):
-                                def __init__(self, model):
-                                    super().__init__()
-                                    self.model = model
-
-                                def forward(self, x):
-                                    output_dict = self.model(x)
-                                    return output_dict['coordinates']
-
-                            export_model = ONNXWrapper(model)
-                            log_func("ONNX 변환: MobileNet 기본 ONNX 래퍼 사용")
-                    else:
+                    # 찾지 못한 경우 기본 래퍼 사용
+                    if export_model is None:
                         class ONNXWrapper(nn.Module):
                             def __init__(self, model):
                                 super().__init__()
@@ -354,7 +346,7 @@ def save_model_as_onnx(
                                 return output_dict['coordinates']
 
                         export_model = ONNXWrapper(model)
-                        log_func("ONNX 변환: coordinates 출력만 추출하는 래퍼 사용")
+                        log_func("ONNX 변환: 기본 래퍼 사용 (coordinates만 출력)")
                 else:
                     log_func("ONNX 변환 경고: 'coordinates' 키를 찾을 수 없음")
                     export_model = model
